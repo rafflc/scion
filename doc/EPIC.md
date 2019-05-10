@@ -28,9 +28,9 @@ The 4 levels allow for the following:
     x'          indicates that variable/field x refers to path H_D -> H_S
                 (only relevant for source validation packets)
 
-    K_i^S       K_{A_i -> A_0:H_S} = symmetric key between host H_S in AS A_0 and AS A_i
-    K_{SD}      K_{A_l:H_D -> A_0:H_S} = symmetric key between host H_S in AS
-                A_0 and host H_D in AS A_l
+    K_i^S       K_{A_i -> A_0:H_S}^{EPIC} = symmetric key between host H_S in AS A_0 and AS A_i for EPIC
+    K_{SD}      K_{A_D:H_D -> A_0:H_S}^{EPIC} = symmetric key between host H_S in AS
+                A_0 and host H_D in AS A_D for EPIC
     SV_A        Local and AS-specific secret value of AS A
 
     H(x)        Hash function of value x
@@ -88,42 +88,42 @@ A_0:H_S has to perform the following steps to obtain the key:
         if key stored
             return key
         if K_{A_i -> A_0} stored
-            return K_{A_i -> A_0:H_S} = PRF_{K_{A_i -> A_0}}(H_S)
+            return K_{A_i -> A_0:H_S}^{EPIC} = PRF_{K_{A_i -> A_0}}("EPIC"|H_S)
         else
             get K_{A_i -> A_0} from CS in A_i
-            return K_{A_i -> A_0:H_S} = PRF_{K_{A_i -> A_0}}(H_S)
+            return K_{A_i -> A_0:H_S}^{EPIC} = PRF_{K_{A_i -> A_0}}("EPIC"|H_S)
     now key available
 
 A_i the following:
 
-    get SV_{A_i} from CS
+    calculate key:
     K_{A_i -> A_0} = PRF_{SV_{A_i}}(A_0)
-    K_{A_i -> A_0:H_S} = PRF_{K_{A_i -> A_0}}(H_S)
+    K_{A_i -> A_0:H_S}^{EPIC} = PRF_{K_{A_i -> A_0}}("EPIC"|H_S)
 
 #### K_{SD}
 
-*(short for K_{A_l:H_D -> A_0:H_S}})*\
-This is a symmetric key shared between host H_S in AS A_0 and host H_D in AS A_l. It is quickly derivable for A_0:H_S.\
+*(short for K_{A_D:H_D -> A_0:H_S}})*\
+This is a symmetric key shared between host H_S in AS A_0 and host H_D in AS A_D. It is quickly derivable for A_D.\
 A_0:H_S has to perform the following steps to obtain the key:
 
     query local CS for key
     CS then:
         if key stored
             return key
-        if K_{A_l -> A_0} stored
-            K_{A_l:H_D -> A_0:H_S} = PRF_{K_{A_l -> A_0}}(H_D|H_S)
+        if K_{A_D -> A_0} stored
+            K_{A_D:H_D -> A_0:H_S}^{EPIC} = PRF_{K_{A_D -> A_0}}("EPIC"|H_D|H_S)
         else
-            get K_{A_l -> A_0} from CS in A_l
-            K_{A_l:H_D -> A_0:H_S} = PRF_{K_{A_l -> A_0}}(H_D|H_S)
+            get K_{A_D -> A_0} from CS in A_D
+            K_{A_D:H_D -> A_0:H_S}^{EPIC} = PRF_{K_{A_D -> A_0}}("EPIC"|H_D|H_S)
     now key available
 
-A_l:H_D the following:
+A_D:H_D the following:
 
-    get SV_{A_l} from CS
-    K_{A_l -> A_0} = PRF_{SV_{A_l}}(A_0)
-    K_{A_l:H_D -> A_0:H_S} = PRF_{K_{A_l -> A_0}}(H_D|H_S)
-
-    
+    query local CS for key
+    CS then:
+        derive key:
+        K_{A_D -> A_0} = PRF_{SV_{A_D}}(A_0)
+        K_{A_D:H_D -> A_0:H_S}^{EPIC} = PRF_{K_{A_D -> A_0}}("EPIC"|H_D|H_S)    
 
 
 ## Design
@@ -260,7 +260,7 @@ A_l:H_D the following:
                 MAC_{K_{SD}}(TS|H(Path)|H(Pld)|V_{1,l}|...|V_{l,l})[0:16]
     l           number of total hop validation fields
     i           number of current hop validation field
-    V_{i,j}     Hop validation field for hop i after processing by AS_j (updated at hop j = i)
+    V_{i,j}     Hop validation field for hop i after field j is processed
                 for i >  j: C_i^1
                 for i <= j: C_i^2
     C_i^a       MAC_{K_i^s}(TS|PathHash|PldHash|$\sigma_i$)[2*(a-1):2*a]
@@ -300,7 +300,7 @@ A_l:H_D the following:
                 MAC_{K_{SD}}(TS|H(Path)|H(Pld)|V_{1,l}|...|V_{l,l})[0:16]
     l           number of total hop validation fields
     i           number of current hop validation field
-    V_{i,j}     Hop validation field for hop i after processing by AS_j
+    V_{i,j}     Hop validation field for hop i after field j is processed
                 for i >  j: C_i^1 (^) C_{i-k}^3 {k = 2^z | 0<=z; k<=i-j}
                 for i <= j: C_i^2
     C_i^a       MAC_{K_i^s}(TS|PathHash|PldHash|$\sigma_i$)[2*(a-1):2*a]
@@ -535,7 +535,7 @@ Definition of fields and variables:
     PldHash =   H(Pld)[0:4]
                 Pld = Layer-4 protocol and data (p. 342)
 
-    l =          number of total hop validation fields (see above how to derive)
+    l =         number of total hop validation fields (see above how to derive)
     i =         1
 
     for all i=1...l:
