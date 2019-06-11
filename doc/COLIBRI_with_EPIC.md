@@ -3,7 +3,7 @@
 This document presents the changes to the COLIBRI protocol introduced through the combination with the EPIC extension.
 
 * Author: Christopher Raffl
-* Last updated: 2019-06-06
+* Last updated: 2019-06-11
 * Status: draft
 
 ### Content
@@ -35,6 +35,7 @@ COLIBRI is an extension to the SCION architecture which introduces a mechanism f
     H(x)        Hash function of value x
     MAC_K(x)    Message authentication code using key K of value x
     PRF_K(x)    Pseudorandom function using key K and input x
+    K(x)        Encryption function using key K and input x
     Floor(x)    Biggest integer value smaller than or equal to x
     x[a:b]      Substring from byte a (inclusive) to byte b (exclusive) of x
 
@@ -172,29 +173,29 @@ The timestamp is computed by the source host while sending and checked by each b
 
 #### Modified computation of MAC of opaque fields in reservation token creating process
 
-In order to modify the MACs in the reservation tokens such that they also involve the Hop Verficiation Field (see below), we have to change their computation during their creation. When sending normal data packets, we will replace the two last bytes of the MAC field. Thus, when  including the previous opaque field we have to ignore the last two bytes of its MAC. Let it define this MAC of the i-th opaque field as hop authenticator (HA_i). Then the opaque field during reservation token creating process will look as follows:
+In order to modify the MACs in the reservation tokens such that they also involve the Hop Verficiation Field (see below), we have to change their computation during their creation. When sending normal data packets, we will replace the two last bytes of the MAC field. Thus, when  including the previous opaque field we have to ignore the last two bytes of its MAC. Furthermore, we will encrypt the MAC with a symmetric key shared between AS A_i and the source host. By doing so, we prevent other hosts on the path to reuse the observed information. Let us define the encrypted MAC of the i-th opaque field as encrpyted hop authenticator (HA_i^{e}) and the decrpyted MAC of the i-th field as decrypted hop authenticator (HA_i^{d}). Then the opaque field during reservation token creating process will look as follows:
 
-    OF_i = IngressIFID_i | EgressIFID_i | HA_i
+    OF_i = IngressIFID_i | EgressIFID_i | HA_i^{e}
 
         where:
-            HA_i 
-            = MAC_{K_{SV_{A_i}}}(IngressIFID_i | EgressIFID_i | SteadyInfo | OF_{prev}[0:6])[0:4]
+            HA_i^{e} 
+            = K_{SV_{A_i}}(MAC_{K_{SV_{A_i}}}(IngressIFID_i | EgressIFID_i | SteadyInfo | OF_{prev}[0:6])[0:4])
 
 
 #### Modified MAC of opaque fields when sending packets by inserting Hop Verification Fields
 
-For each opaque field i, a 2 byte hop verification field V_i will be included when sending a packet. They will replace the last two bytes of the field, reducing the length of the previous MAC. In this way, no further overhead is added to the packet. The purpose of this field is to enable border routers to authenticate each packet as well as the integrity of the most important fields. This prevents attackers from e.g. using once observed paths with different payloads. In the computation of the V_i we include all the fields that are relevant to be able to bind this specific packet to this reservation at this point in time with this certain payload. Also assuming a packet replay suppression mechanism being established, there is no possibility for an attacker to reuse parts of a once observed packet. Furthermore by including the full HA_i in the computation we enable each border router R_i to authenticate the path traversed in the corresponding AS A_i. Altough we do not include the full HA_i in the packet, each AS_i is able to derive this. The hop verification fields are computed by the source host. Each border router then checks its corresponding field.\
+For each opaque field i, a 2 byte hop verification field V_i will be included when sending a packet. They will replace the last two bytes of the field, reducing the length of the previous MAC. In this way, no further overhead is added to the packet. The purpose of this field is to enable border routers to authenticate each packet as well as the integrity of the most important fields. This prevents attackers from e.g. using once observed paths with different payloads. In the computation of the V_i we include all the fields that are relevant to be able to bind this specific packet to this reservation at this point in time with this certain payload. Also assuming a packet replay suppression mechanism being established, there is no possibility for an attacker to reuse parts of a once observed packet. Furthermore by including the full HA_i^{d} in its decrypted version in the computation we enable each border router R_i to authenticate the path traversed in the corresponding AS A_i and prevent other ASes on the path to missuse the hop. For border router R_i to be able to recalculate and validate the hop verification field V_i it needs the encrypted version of the first two bytes of the MAC of the previous hop (see above). Also notice that each border router is able to recompute its corresponding hop authenticator and thus not the full version needs to be included. The hop verification fields are computed by the source host. Each border router then checks its corresponding field.\
 Since segment setup requests do not have active reservation tokens but use the normal SCION path fields, we have to use another method for those packets. Each hop on the way checks anyway if the chosen path corresponds to its policies while processing the request. Therefore, the non-existence of hop authenticators does not result in a problem. To still bind all information together, we include a Hash over the SCION path (PathHash) in the computation. The hop verification fields will be insterted at the place where in other packets the reservation tokens are situated.
 
     Non segment setup request packets on end to end reservations:
-    OF_i = IngressIFID_i | EgressIFID_i | HA_i[0:2] | V_i
+    OF_i = IngressIFID_i | EgressIFID_i | HA_i^{e}[0:2] | V_i
         where:
-            V_i =   MAC_{K_i^{H_S}}(TS|PldHash|HA_i)[0:2]
+            V_i =   MAC_{K_i^{H_S}}(TS|PldHash|HA_i^{d})[0:2]
 
     Non segment setup request packets on segment reservations:
-    OF_i = IngressIFID_i | EgressIFID_i | HA_i[0:2] | V_i
+    OF_i = IngressIFID_i | EgressIFID_i | HA_i^{e}[0:2] | V_i
         where:
-            V_i =   MAC_{K_i^S}(TS|PldHash|HA_i)[0:2]
+            V_i =   MAC_{K_i^S}(TS|PldHash|HA_i^{d})[0:2]
 
     Segment setup request packet:
     V_i = MAC_{K_i^S}(TS|PldHash|PathHash)[0:2]
@@ -204,5 +205,6 @@ Since segment setup requests do not have active reservation tokens but use the n
 ## 5 Ideas / uncertainties / problems
 
 * (6/6 rafflc) Instead of introducing the same mechanism for the request fields, maybe it would make sense to modify the already existing authenticator fields in the request payload. However, checking Authenticators at the border routers possibly reduces performance, while introducing these additional fields only brings little overhead reagarding packet size (except for segment setup requests).\
-Also I am not sure if these authenticators already include the whole packet or only the request payload
+Also I am not sure if these authenticators already include the whole packet or only the request payload.\
+(6/11 rafflc) After discussing with Dominik: Bad idea. Authenticators only authenticate payload
 * (6/6 rafflc) Maybe we can add a mechanism that makes it optional to use the V_{SD} or at least think about different sizes.
