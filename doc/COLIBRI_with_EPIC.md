@@ -3,7 +3,7 @@
 This document presents the changes to the COLIBRI protocol introduced through the combination with the EPIC extension.
 
 * Author: Christopher Raffl
-* Last updated: 2019-06-11
+* Last updated: 2019-06-18
 * Status: draft
 
 ### Content
@@ -153,18 +153,18 @@ This field is computed by the source host while sending the packet and for effic
 
 #### Timestamp
 
-The Timestamp is inserted right after the Payload Hash. Since both those fields are 4 bytes, together they fit the 8-byte aligning required for SCION extensions. For all packets but segment setup requests, the timestamp encodes the construction time of the packet relative to the expiration time defined in the first reservation token in a 4 byte unsigned int. Since end-to-end reservations are only valid up to 4 COLIBRI ticks (=16 seconds), using 4 bytes results in a granularity of about 3.73 ns. Assuming a packet size of at least 544 bits(which is very conservative), this enables us to uniquely identify all packets on a link with a bandwidth of up to 145 Gbit/s. Segment reservations are valid up to 80 COLIBRI ticks (~5 minutes), which gives us a granularity of about 74.6 ns. Since segment reservations should not be used for excessive amounts of traffic, this should also suffice to uniquely determine each packet. Packets including requests as payloads already have a timestamp PldTS in the payload field in the current implementation. It indicates the construction time in seconds since the unix epoch. Since all requests apart from the segment setup request also have at least one active reservation token, they have an expiration time field we can use for the Timestamp. Thus, the current timestamp PldTS does not provide any further information and will be removed for all request packets except for segment setup request packets. These packets have a non-empty SCION path and thus also an extra field indicating the expiration time of the time. However, by making our TS dependent on this, the resulting granularity is about 100 ms which does not suffice for our purposes. As a consequence we will keep the PldTS for this case and encode the time in TS relative to this field.\
-The possibility for all border routers to uniquely define each packet using its TS and source address gives us a good starting point for building a packet replay suppression mechanism. Through the checks the authenticity of this information can be varyfied by each border router.\
+The Timestamp is inserted right after the Payload Hash. Since both those fields are 4 bytes, together they fit the 8-byte aligning required for SCION extensions. For all packets but segment setup requests, the timestamp encodes the construction time of the packet relative to the expiration time defined in the first reservation token in a 4 byte unsigned int. Since end-to-end reservations are only valid up to 4 COLIBRI ticks (=16 seconds), using 4 bytes results in a granularity of about 3.73 ns. Assuming a packet size of at least 544 bits(which is very conservative **TODO:** Update this value an show calculation), this enables us to uniquely identify all packets on a link with a bandwidth of up to 145 Gbit/s. Segment reservations are valid up to 80 COLIBRI ticks (~5 minutes), which gives us a granularity of about 74.6 ns. Since segment reservations should not be used for excessive amounts of traffic, this should also suffice to uniquely determine each packet. Packets including requests as payloads already have a timestamp PldTS in the payload field in the current implementation. It indicates the construction time in seconds since the unix epoch. Since all requests apart from the segment setup request also have at least one active reservation token, they have an expiration time field we can use for the Timestamp. Thus, the current timestamp PldTS does not provide any further information and will be removed for all request packets except for segment setup request packets. These packets have a non-empty SCION path and thus also an extra field indicating the expiration time of the path. However, if we made our TS dependent on this, the resulting granularity would be about 100 ms which does not suffice for our purposes. As a consequence we will keep the PldTS for this case and encode the time in TS relative to this field.\
+The possibility for all border routers to uniquely define each packet using its TS and source address gives us a good starting point for building a packet replay suppression mechanism. Through the checks the authenticity of this information can be veryfied by each border router.\
 The timestamp is computed by the source host while sending and checked by each border router as well as the desination host.
 
     End-to-end reservations:
-    TS =        (ExpTime - CT) * Floor(2^32/16'000'000'000)
+    TS =        Floor((ExpTime - CT) * (2^32/16'000'000'000))
 
     Segment reservations:
-    TS =        (ExpTime - CT) * Floor(2^32/320'000'000'000)
+    TS =        Floor((ExpTime - CT) * (2^32/320'000'000'000))
 
     Segment setup request packets:
-    TS =        (CT + PldTS) * Floor(2^32/320'000'000'000)
+    TS =        Floor((CT - PldTS) * (2^32/320'000'000'000))
 
         where:
             CT =        Construction time in nanoseconds
@@ -173,13 +173,13 @@ The timestamp is computed by the source host while sending and checked by each b
 
 #### Modified computation of MAC of opaque fields in reservation token creating process
 
-In order to modify the MACs in the reservation tokens such that they also involve the Hop Verficiation Field (see below), we have to change their computation during their creation. When sending normal data packets, we will replace the two last bytes of the MAC field. Thus, when  including the previous opaque field we have to ignore the last two bytes of its MAC. Furthermore, we will encrypt the MAC with a symmetric key shared between AS A_i and the source host. By doing so, we prevent other hosts on the path to reuse the observed information. Let us define the encrypted MAC of the i-th opaque field as encrpyted hop authenticator (HA_i^{e}) and the decrpyted MAC of the i-th field as decrypted hop authenticator (HA_i^{d}). Then the opaque field during reservation token creating process will look as follows:
+In order to modify the MACs in the reservation tokens such that they also include the Hop Verficiation Field (see below), we have to change their computation during their creation. When sending normal data packets, we will only send the first two bytes of the MAC field. Thus, when  including the previous opaque field we have to ignore all other bytes of its MAC. Furthermore, we will encrypt the MAC with a symmetric key shared between AS A_i and the source host. By doing so, we prevent other hosts on the path to reuse the observed information. Let us define the encrypted MAC of the i-th opaque field as encrpyted hop authenticator (HA_i^{e}) and the decrpyted MAC of the i-th field as decrypted hop authenticator (HA_i^{d}). Note that we include the full MAC without truncation. Then the opaque field during reservation token creating process will look as follows:
 
     OF_i = IngressIFID_i | EgressIFID_i | HA_i^{e}
 
         where:
             HA_i^{e} 
-            = K_{SV_{A_i}}(MAC_{K_{SV_{A_i}}}(IngressIFID_i | EgressIFID_i | SteadyInfo | OF_{prev}[0:6])[0:4])
+            = K_{SV_{A_i}}(MAC_{K_{SV_{A_i}}}(IngressIFID_i | EgressIFID_i | SteadyInfo | OF_{prev}[0:6]))
 
 
 #### Modified MAC of opaque fields when sending packets by inserting Hop Verification Fields
@@ -208,3 +208,5 @@ Since segment setup requests do not have active reservation tokens but use the n
 Also I am not sure if these authenticators already include the whole packet or only the request payload.\
 (6/11 rafflc) After discussing with Dominik: Bad idea. Authenticators only authenticate payload
 * (6/6 rafflc) Maybe we can add a mechanism that makes it optional to use the V_{SD} or at least think about different sizes.
+* (6/12 rafflc) Do we really need onion authentication?
+* (6/12 rafflc) Can't we just use a hash for computing the V_i? But only for non segment setup request packets on end to end reservations?
