@@ -18,8 +18,6 @@ import (
 	"bufio"
 	"flag"
 	"fmt"
-	"github.com/scionproto/scion/go/lib/assert"
-	"github.com/scionproto/scion/go/lib/l4"
 	"io"
 	"io/ioutil"
 	"math/rand"
@@ -31,7 +29,12 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/scionproto/scion/go/lib/assert"
+	"github.com/scionproto/scion/go/lib/l4"
+
 	"context"
+
+	"encoding/csv"
 
 	"github.com/scionproto/scion/go/lib/addr"
 	"github.com/scionproto/scion/go/lib/common"
@@ -45,7 +48,6 @@ import (
 	"github.com/scionproto/scion/go/lib/spath"
 	"github.com/scionproto/scion/go/lib/spath/spathmeta"
 	"github.com/scionproto/scion/go/sibrad/resvmgr"
-	"encoding/csv"
 )
 
 const (
@@ -85,11 +87,11 @@ var (
 		"are accepted by default.")
 
 	// My modifications
-	mtu = flag.Uint("packetSize", 800, "UDP packet payload size")
-	duration = flag.Uint("duration", 5, "Duration of test (in seconds)")
-	bandwidth = flag.Uint("bandwidth", 1024, "Bandwidth at which to send data (bytes per second)")
-	useSibra = flag.Bool("sibra", true, "Use sibra paths")
-	paceFile = flag.String("pf", "", "File containing packet sizes and timings for reproducing existing flow")
+	mtu            = flag.Uint("packetSize", 800, "UDP packet payload size")
+	duration       = flag.Uint("duration", 5, "Duration of test (in seconds)")
+	bandwidth      = flag.Uint("bandwidth", 1024, "Bandwidth at which to send data (bytes per second)")
+	useSibra       = flag.Bool("sibra", true, "Use sibra paths")
+	paceFile       = flag.String("pf", "", "File containing packet sizes and timings for reproducing existing flow")
 	repeatFlowFile = flag.Int("repeat", 1, "Number of times to repeat the flow file data")
 
 	fileData []byte
@@ -180,10 +182,10 @@ func LogFatal(msg string, a ...interface{}) {
 func initNetwork() {
 	// Initialize default SCION networking context
 	// FIX: Sometimes init fails, so we try to do it 5 times
-	for initAtempts:=5;initAtempts>=0; initAtempts--{
+	for initAtempts := 5; initAtempts >= 0; initAtempts-- {
 		if err := snet.Init(local.IA, *sciond, *dispatcher); err != nil {
 			LogFatal("Unable to initialize SCION network", "err", err)
-			time.Sleep(time.Millisecond*100)
+			time.Sleep(time.Millisecond * 100)
 			continue
 		}
 		break
@@ -192,9 +194,9 @@ func initNetwork() {
 }
 
 type client struct {
-	sess *snet.Conn
-	mgr  *resvmgr.Mgr
-	clientId	uint64
+	sess     *snet.Conn
+	mgr      *resvmgr.Mgr
+	clientId uint64
 }
 
 func newClient() *client {
@@ -238,7 +240,7 @@ func (c *client) run() {
 
 	fmt.Println("Creating channels")
 	rcvChannel := make(chan common.RawBytes)
-	go c.read(rcvChannel)	// Reading all messages that are coming
+	go c.read(rcvChannel) // Reading all messages that are coming
 	fmt.Println("Created read goroutine")
 
 	var droppedPacktes uint64 = 0
@@ -247,12 +249,12 @@ func (c *client) run() {
 	if packetTimings != nil {
 		packetNumber = uint64(len(packetTimings)) * uint64(*repeatFlowFile)
 		testId = c.registerNewTest(uint64(packetNumber), testDuration, maxPacketLength, rcvChannel)
-		if *repeatFlowFile<0{
-			for{
+		if *repeatFlowFile < 0 {
+			for {
 				c.sendDataFromFile(packetTimings, testId, testDuration, maxPacketLength)
 			}
-		}else{
-			for i:=0; i<int(*repeatFlowFile); i++ {
+		} else {
+			for i := 0; i < int(*repeatFlowFile); i++ {
 				droppedPacktes += c.sendDataFromFile(packetTimings, testId, testDuration, maxPacketLength)
 			}
 		}
@@ -260,48 +262,48 @@ func (c *client) run() {
 	} else {
 		var pace time.Duration
 		packetNumber, pace = calculatePacketCount(*bandwidth, *duration, *mtu)
-		testId = c.registerNewTest(uint64(packetNumber), time.Duration(*duration)*time.Second, 1000, rcvChannel)
+		testId = c.registerNewTest(uint64(packetNumber), time.Duration(*duration)*time.Second, 800, rcvChannel)
 		droppedPacktes = c.sendDataConstantRate(uint64(packetNumber), uint64(pace), testId, uint64(*duration))
 	}
 	droppedPacktes += c.GetTestStatus(testId, rcvChannel)
 	c.DisplayResults(uint64(packetNumber), droppedPacktes, uint64(*duration))
 }
 
-func calculatePacketCount(bandwidth, seconds, packetSize uint) (uint64, time.Duration){
+func calculatePacketCount(bandwidth, seconds, packetSize uint) (uint64, time.Duration) {
 	log.Debug("Calculating pace", "desired_bandwidth", bandwidth, "test_duration", seconds, "packet_size", packetSize)
 
 	totalData := bandwidth * seconds
-	totalPackets := totalData / (packetSize+l4.UDPLen)
-	pace := time.Duration(seconds * uint(time.Second)/totalPackets)
+	totalPackets := totalData / (packetSize + l4.UDPLen)
+	pace := time.Duration(seconds * uint(time.Second) / totalPackets)
 	return uint64(totalPackets), pace
 }
 
 func (c *client) registerNewTest(packetNumber uint64, duration time.Duration, maxPacketLength int, rcvChannel <-chan common.RawBytes) uint64 {
 	fmt.Println("Registring new test!")
 	msg := &MsgCreateTest{
-		Packets:packetNumber,
-		Duration:uint64(duration),
-		Mtu: uint64(maxPacketLength),
+		Packets:  packetNumber,
+		Duration: uint64(duration),
+		Mtu:      uint64(maxPacketLength),
 	}
-	buf:=make(common.RawBytes, maxPacketLength)
+	buf := make(common.RawBytes, maxPacketLength)
 	buf = msg.Pack(buf)
 	_, err := c.sess.Write(buf)
 	if err != nil {
 		log.Error("Unable to write", "err", err)
 	}
-	buf = ReceiveMessage(rcvChannel,TestCreated)
+	buf = ReceiveMessage(rcvChannel, TestCreated)
 	var tc MsgTestCreated
 	tc.Unpack(buf)
 	return tc.SessionId
 }
 
-func (c *client) sendDataFromFile(timings []packetTiming, sessionId uint64, testDuration time.Duration, maxPacketSize int) (uint64) {
-	const HEADER_SIZE=120	//TODO: Verify header size
+func (c *client) sendDataFromFile(timings []packetTiming, sessionId uint64, testDuration time.Duration, maxPacketSize int) uint64 {
+	const HEADER_SIZE = 120 //TODO: Verify header size
 
 	sendBuffer := make(common.RawBytes, maxPacketSize)
-	dataMsg := MsgPayload {
-		SessionId:sessionId,
-		PacketIndex:0,
+	dataMsg := MsgPayload{
+		SessionId:   sessionId,
+		PacketIndex: 0,
 	}
 
 	log.Debug("Sending data from provided flow info file", "test_duration", testDuration, "max_packet_size", maxPacketSize)
@@ -315,18 +317,18 @@ func (c *client) sendDataFromFile(timings []packetTiming, sessionId uint64, test
 	for pn = 0; pn < packetNumber; pn++ {
 		now := time.Now()
 
-		if (endDeadline.Before(now)){
-			log.Warn("Time limit exceeded! Couldn't send all the messages","packet_number", packetNumber, "sentPackets", pn)
+		if endDeadline.Before(now) {
+			log.Warn("Time limit exceeded! Couldn't send all the messages", "packet_number", packetNumber, "sentPackets", pn)
 			break
 		}
 
 		packetSize := max(dataMsg.Size(), timings[pn].packetSize-HEADER_SIZE)
 		timeForPacket := lastPacketSent.Add(timings[pn].sleepBeforeSend)
-		if now.Before(timeForPacket){
+		if now.Before(timeForPacket) {
 			time.Sleep(timeForPacket.Sub(now))
 		}
 
-		dataMsg.PacketIndex=uint64(pn)
+		dataMsg.PacketIndex = uint64(pn)
 		dataMsg.Pack(sendBuffer)
 
 		_, err := c.sess.Write(sendBuffer[:packetSize])
@@ -336,22 +338,22 @@ func (c *client) sendDataFromFile(timings []packetTiming, sessionId uint64, test
 		lastPacketSent = time.Now()
 	}
 
-	return uint64(packetNumber-pn-1)
+	return uint64(packetNumber - pn - 1)
 }
 
-func (c *client) sendDataConstantRate(packetNumber, pace, sessionId, totalTime uint64) (uint64) {
+func (c *client) sendDataConstantRate(packetNumber, pace, sessionId, totalTime uint64) uint64 {
 	sendBuffer := make(common.RawBytes, *mtu)
 	dataMsg := MsgPayload{
-		SessionId:sessionId,
-		PacketIndex:0,
+		SessionId:   sessionId,
+		PacketIndex: 0,
 	}
 
 	nextPacketScheduled := time.Now()
-	nextPacketScheduled=nextPacketScheduled.Add(time.Duration(pace))
+	nextPacketScheduled = nextPacketScheduled.Add(time.Duration(pace))
 
 	log.Debug("Sending packets with pace of", "time", time.Duration(pace))
 
-	endDeadline := time.Now().Add(time.Duration(totalTime)*time.Second)
+	endDeadline := time.Now().Add(time.Duration(totalTime) * time.Second)
 
 	var pn uint64
 	for pn = uint64(0); pn < packetNumber; pn++ {
@@ -363,14 +365,14 @@ func (c *client) sendDataConstantRate(packetNumber, pace, sessionId, totalTime u
 		//if now.After(lastDeadline){
 		//	dropThisPacket=true
 		//}
-		if (endDeadline.Before(now)){
-			log.Warn("Time limit exceeded! Couldn't send all the messages","packet_number", packetNumber, "sentPackets", pn)
+		if endDeadline.Before(now) {
+			log.Warn("Time limit exceeded! Couldn't send all the messages", "packet_number", packetNumber, "sentPackets", pn)
 			break
 		}
 
-		nextPacketScheduled=nextPacketScheduled.Add(time.Duration(pace))
+		nextPacketScheduled = nextPacketScheduled.Add(time.Duration(pace))
 
-		dataMsg.PacketIndex=pn
+		dataMsg.PacketIndex = pn
 		//if dropThisPacket {
 		//	// Dropping packet to keep up the pace
 		//	continue
@@ -383,20 +385,20 @@ func (c *client) sendDataConstantRate(packetNumber, pace, sessionId, totalTime u
 		}
 		now = time.Now()
 
-		if(now.Before(nextPacketScheduled)){
+		if now.Before(nextPacketScheduled) {
 			time.Sleep(nextPacketScheduled.Sub(now))
 		}
 	}
 
-	return (packetNumber-pn)-1;
+	return (packetNumber - pn) - 1
 }
 
-func (c *client) GetTestStatus(sessionId uint64, rcvChannel <-chan common.RawBytes) uint64{
+func (c *client) GetTestStatus(sessionId uint64, rcvChannel <-chan common.RawBytes) uint64 {
 	time.Sleep(time.Second)
 	msg := &MsgTestEnd{
-		SessionId:sessionId,
+		SessionId: sessionId,
 	}
-	buf:=make(common.RawBytes, msg.Size())
+	buf := make(common.RawBytes, msg.Size())
 	buf = msg.Pack(buf)
 	_, err := c.sess.Write(buf)
 	if err != nil {
@@ -409,9 +411,9 @@ func (c *client) GetTestStatus(sessionId uint64, rcvChannel <-chan common.RawByt
 }
 
 func (c *client) DisplayResults(packetNumber, droppedPackets uint64, testDuration uint64) {
-	dropRate := float64(droppedPackets * 100) / float64(packetNumber)
-	sentData := (packetNumber-droppedPackets)*(uint64)(*mtu)
-	bps := sibra.Bps(float64(sentData)/float64(testDuration))
+	dropRate := float64(droppedPackets*100) / float64(packetNumber)
+	sentData := (packetNumber - droppedPackets) * (uint64)(*mtu)
+	bps := sibra.Bps(float64(sentData) / float64(testDuration))
 	fmt.Println(fmt.Sprintf("We sent: %d packets and dropped: %d packets. Drop rate: %f", packetNumber, droppedPackets, dropRate))
 	fmt.Fprintf(os.Stderr, "Speed: %s drop rate: %f\n", bps.String(), dropRate)
 }
@@ -431,11 +433,11 @@ func (c *client) initResvMgr() {
 	if err != nil {
 		LogFatal("Unable to create trust store", "err", err)
 	}
-	for retry:=5; retry>=0; retry-- {
+	for retry := 5; retry >= 0; retry-- {
 		c.mgr, err = resvmgr.New(snet.DefNetwork.Sciond(), conn, store, nil)
 		if err != nil {
 			log.Warn("Unable to start reservation manager", err)
-			time.Sleep(time.Millisecond*100)
+			time.Sleep(time.Millisecond * 100)
 			continue
 		}
 		break
@@ -451,7 +453,7 @@ func (c *client) Close() error {
 }
 
 func (c client) setupPath(sibra bool, bwClass sibra.BwCls) *resvmgr.WatchState {
-	if (sibra){
+	if sibra {
 		log.Info("Configuring path with SIBRA")
 		if !remote.IA.Eq(local.IA) {
 			if *flush {
@@ -471,7 +473,7 @@ func (c client) setupPath(sibra bool, bwClass sibra.BwCls) *resvmgr.WatchState {
 			log.Info("sibrevs", "watchState", ws, "remote", remote.SibraResv)
 			return ws
 		}
-	}else{
+	} else {
 		log.Info("Configuring path WITHOUT SIBRA")
 		if !remote.IA.Eq(local.IA) {
 			pathEntry := choosePath(*interactive)
@@ -496,34 +498,34 @@ func (c client) read(receivedPackets chan<- common.RawBytes) {
 	fmt.Println("Starting to read packets")
 	for {
 		_, err := c.sess.Read(buf)
-		if err==nil{
+		if err == nil {
 			fmt.Println("Got a packet!")
-			switch messageType := common.Order.Uint64(buf); messageType{
+			switch messageType := common.Order.Uint64(buf); messageType {
 			case TestCreated:
-				res:=make(common.RawBytes, len(buf))
+				res := make(common.RawBytes, len(buf))
 				copy(res, buf)
-				receivedPackets<-res
+				receivedPackets <- res
 			case TestResult:
-				res:=make(common.RawBytes, len(buf))
+				res := make(common.RawBytes, len(buf))
 				copy(res, buf)
-				receivedPackets<-res
+				receivedPackets <- res
 			default:
 				log.Debug("Unknown message received", "messageType", messageType)
 			}
-		}else{
+		} else {
 			log.Error("Reading packets", "Error", err)
 		}
 	}
 }
 
-func ReceiveMessage(receivedPackets <-chan common.RawBytes, messageType uint64) common.RawBytes{
+func ReceiveMessage(receivedPackets <-chan common.RawBytes, messageType uint64) common.RawBytes {
 	fmt.Println("Receving messages")
-	for{
+	for {
 		buf := <-receivedPackets
-		receivedType := common.Order.Uint64(buf);
-		if(messageType == receivedType){
+		receivedType := common.Order.Uint64(buf)
+		if messageType == receivedType {
 			return buf
-		}else{
+		} else {
 			log.Error("We didn't receive what we were looking for!")
 		}
 	}
@@ -533,22 +535,21 @@ func ReceiveMessage(receivedPackets <-chan common.RawBytes, messageType uint64) 
 
 type clientData struct {
 	DroppedPackets uint64
-	LastPacketNum uint64
+	LastPacketNum  uint64
 }
 
 type server struct {
 	sync.Mutex
 	mgr      *resvmgr.Mgr
 	sock     *snet.Conn
-	sessions map[uint64] *clientData
-	lastId uint64
+	sessions map[uint64]*clientData
+	lastId   uint64
 }
-
 
 // run listens on a SCION address and replies to any ping message.
 // On any error, the server exits.
 func (s server) run() {
-	s.sessions = make(map[uint64] *clientData)
+	s.sessions = make(map[uint64]*clientData)
 
 	s.initResvMgr()
 	// Listen on SCION address
@@ -569,13 +570,13 @@ func (s server) run() {
 			break
 		}
 
-		switch messageType := common.Order.Uint64(b); messageType{
+		switch messageType := common.Order.Uint64(b); messageType {
 		case TestCreate:
 			log.Debug("Creating new session", "sibra_type", getSibraMode(raddr))
-			newSession := MsgTestCreated{SessionId:s.lastId}
-			s.sessions[s.lastId]=&clientData{
-				DroppedPackets:0,
-				LastPacketNum:0,
+			newSession := MsgTestCreated{SessionId: s.lastId}
+			s.sessions[s.lastId] = &clientData{
+				DroppedPackets: 0,
+				LastPacketNum:  0,
 			}
 			s.lastId++
 			newSession.Pack(sendBUffer)
@@ -584,8 +585,8 @@ func (s server) run() {
 			var request MsgTestEnd
 			request.Unpack(b)
 			response := MsgTestResult{
-				SessionId:request.SessionId,
-				DroppedPackets:s.sessions[request.SessionId].DroppedPackets,
+				SessionId:      request.SessionId,
+				DroppedPackets: s.sessions[request.SessionId].DroppedPackets,
 			}
 			response.Pack(sendBUffer)
 		case TestData:
@@ -604,20 +605,20 @@ func (s server) run() {
 	}
 }
 
-func (s *server)processDataRequest(buf common.RawBytes){
+func (s *server) processDataRequest(buf common.RawBytes) {
 	dataPacket := MsgPayload{}
 	dataPacket.Unpack(buf)
 	sessId := dataPacket.SessionId
 	//log.Debug("Received payload packet", "session_id", sessId)
 	session := s.sessions[sessId]
-	assert.Must(session!=nil, "Unknown sessino ID")
-	if (dataPacket.PacketIndex < session.LastPacketNum){
+	assert.Must(session != nil, "Unknown sessino ID")
+	if dataPacket.PacketIndex < session.LastPacketNum {
 		if session.DroppedPackets > 0 {
-			session.DroppedPackets--;
+			session.DroppedPackets--
 		}
-	}else if dataPacket.PacketIndex > session.LastPacketNum {
-		session.DroppedPackets += dataPacket.PacketIndex-session.LastPacketNum-1
-		session.LastPacketNum=dataPacket.PacketIndex
+	} else if dataPacket.PacketIndex > session.LastPacketNum {
+		session.DroppedPackets += dataPacket.PacketIndex - session.LastPacketNum - 1
+		session.LastPacketNum = dataPacket.PacketIndex
 	}
 }
 
@@ -814,29 +815,29 @@ func setSignalHandler(closer io.Closer) {
 	}()
 }
 
-type packetTiming struct{
-	packetSize int
+type packetTiming struct {
+	packetSize      int
 	sleepBeforeSend time.Duration
 }
 
-func max(first, second int)int{
-	if first>second{
+func max(first, second int) int {
+	if first > second {
 		return first
-	}else{
+	} else {
 		return second
 	}
 }
-func min(first, second int)int{
+func min(first, second int) int {
 	return max(second, first)
 }
 
-func loadPaceFile(filename string)(packets []packetTiming, testTime time.Duration, maxPacketLength int, bwClass sibra.BwCls){
+func loadPaceFile(filename string) (packets []packetTiming, testTime time.Duration, maxPacketLength int, bwClass sibra.BwCls) {
 	log.Debug("Loading file with flow information")
 	csv_file, _ := os.Open(filename)
 	r := csv.NewReader(csv_file)
-	var totalTime time.Duration=0
-	packets=make([]packetTiming,0)
-	maxPacketLength=0
+	var totalTime time.Duration = 0
+	packets = make([]packetTiming, 0)
+	maxPacketLength = 0
 
 	for {
 		record, err := r.Read()
@@ -850,9 +851,9 @@ func loadPaceFile(filename string)(packets []packetTiming, testTime time.Duratio
 		timing, _ := strconv.Atoi(record[0])
 		ps, _ := strconv.Atoi(record[1])
 
-		packets=append(packets, packetTiming{sleepBeforeSend:time.Duration(timing)*time.Microsecond, packetSize:ps})
-		totalTime+=time.Duration(timing)*time.Microsecond
-		maxPacketLength=max(maxPacketLength, ps)
+		packets = append(packets, packetTiming{sleepBeforeSend: time.Duration(timing) * time.Microsecond, packetSize: ps})
+		totalTime += time.Duration(timing) * time.Microsecond
+		maxPacketLength = max(maxPacketLength, ps)
 	}
 
 	bwClass = getMaxBW(packets, 500*time.Millisecond)
@@ -866,23 +867,23 @@ func getMaxBW(packets []packetTiming, window time.Duration) sibra.BwCls {
 	var currentWindow time.Duration = 0
 	var currData int = 0
 	var maxData int = 0
-	for ;right<len(packets);right++{
-		currentWindow+=packets[right].sleepBeforeSend
-		currData+=packets[right].packetSize
+	for ; right < len(packets); right++ {
+		currentWindow += packets[right].sleepBeforeSend
+		currData += packets[right].packetSize
 
-		for ;currentWindow>window && left<right; left++{
-			if currentWindow-packets[left].sleepBeforeSend<window{
-				break;
+		for ; currentWindow > window && left < right; left++ {
+			if currentWindow-packets[left].sleepBeforeSend < window {
+				break
 			}
-			currentWindow-=packets[left].sleepBeforeSend
-			currData-=packets[left].packetSize
+			currentWindow -= packets[left].sleepBeforeSend
+			currData -= packets[left].packetSize
 		}
 
-		maxData=max(maxData, currData)
+		maxData = max(maxData, currData)
 	}
 
-	ratio := time.Second/window
-	var bps sibra.Bps = sibra.Bps(maxData*int(ratio))
+	ratio := time.Second / window
+	var bps sibra.Bps = sibra.Bps(maxData * int(ratio))
 	log.Debug("Calculated required bandwidth", "requiredBandwidth", bps.String(), "maxWindow", maxData)
 	return bps.ToBwCls(true)
 }
