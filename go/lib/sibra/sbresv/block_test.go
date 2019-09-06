@@ -73,7 +73,7 @@ func TestNewBlock(t *testing.T) {
 				{Mac: make(common.RawBytes, 4)},
 			},
 		}
-		other := NewBlock(block.Info, 5)
+		other := NewBlock(block.Info, 5, Data)
 		SoMsg("info", other.Info.Eq(block.Info), ShouldBeTrue)
 		SoMsg("sof", other.SOFields, ShouldResemble, block.SOFields)
 	})

@@ -39,6 +39,8 @@ func (r *resolver) resolveSteady(entry *resvEntry, path *spathmeta.AppPath) (boo
 	if err != nil {
 		return false, err
 	}
+	// TODO: (rafflc) here we have to think of something how to handle these reservations.
+	// Also, figure out if they are already reservation or control :)
 	steadyExtn, err := sbcreate.NewSteadyBE(bmetas, true)
 	if err != nil {
 		return false, err
@@ -96,6 +98,8 @@ func (r *resolver) fetchSteadyResv(ctx context.Context,
 
 		}
 		if bmetas[i] != nil {
+			// REVISE (rafflc) I think without this, this will deadlock
+			// errC <- nil
 			continue
 		}
 		saddr, err := r.getAddrForSteadyReq(reqs[i])
@@ -105,13 +109,16 @@ func (r *resolver) fetchSteadyResv(ctx context.Context,
 		reqCopy := reqs[i]
 		iCopy := i
 		go func() {
+			// TODO: (rafflc) Not sure how exactly this get sibrasteady is sent.
+			// Does it require me to write sibrafields sowhere?
+			// Update: yas i do think so
 			rep, err := r.msgr.GetSibraSteady(ctx, reqCopy, saddr, requestID.Next())
 			if err != nil {
 				errC <- err
 				return
 			}
 			if len(rep.Recs.Entries) < 1 {
-				errC <- common.NewBasicError("No reservation found", nil)
+				errC <- common.NewBasicError("No reservation found because empty", nil)
 				return
 			}
 			bmetas[iCopy] = rep.Recs.Entries[0]

@@ -33,6 +33,7 @@ import (
 	"github.com/scionproto/scion/go/lib/sibra/sbresv"
 	"github.com/scionproto/scion/go/lib/snet"
 	"github.com/scionproto/scion/go/lib/spkt"
+	"github.com/scionproto/scion/go/lib/util"
 )
 
 const (
@@ -159,6 +160,12 @@ func (r reqstr) callTimeOut(i reqstrI) {
 	}
 }
 
+// REVISE: (rafflc) Here all types of ephem request packets are sent.
+// Other functions are called which call again other functions, but as far as I see,
+// none of them further modifies the extension :)
+// In all sent requests, SIBRA fields are written.
+// In the corresponding answer, SIBRA fields are checked.
+
 func (r *reqstr) sendRequest() error {
 	pkt := &spkt.ScnPkt{
 		DstIA:   r.dstIA,
@@ -232,10 +239,10 @@ type EphemSetup struct {
 	*reserver
 }
 
-func minTick(first, second sibra.Tick)sibra.Tick{
-	if first>second{
+func minTick(first, second sibra.Tick) sibra.Tick {
+	if first > second {
 		return second
-	}else{
+	} else {
 		return first
 	}
 }
@@ -248,26 +255,41 @@ func (s *EphemSetup) PrepareRequest() (common.Extension, *sbreq.Pld, error) {
 		return nil, nil, common.NewBasicError("Steady extension not available", nil)
 	}
 	steady = steady.Copy().(*sbextn.Steady)
-	maxDuration := minTick(sibra.TimeToTick(steady.Expiry()), sibra.CurrentTick() + sibra.MaxEphemTicks)
+	maxDuration := minTick(sibra.TimeToTick(steady.Expiry()), sibra.CurrentTick()+sibra.MaxEphemTicks)
 	info := &sbresv.Info{
 		ExpTick:  maxDuration,
 		BwCls:    s.bwCls,
 		PathType: sibra.PathTypeEphemeral,
 		RLC:      sibra.DurationToRLC(combineRLC(steady), true),
 	}
+	// TODO: (rafflc) Initialize Authenticators
 	pld := &sbreq.Pld{
-		Type:      sbreq.REphmSetup,
-		NumHops:   uint8(steady.TotalHops),
-		TimeStamp: uint32(time.Now().Unix()),
-		Accepted:  true,
-		Auths:     make([]common.RawBytes, steady.TotalHops),
+		Type:     sbreq.REphmSetup,
+		NumHops:  uint8(steady.TotalHops),
+		Accepted: true,
+		Auths:    make([]common.RawBytes, steady.TotalHops),
 		Data: &sbreq.EphemReq{
 			ID:    s.id,
-			Block: sbresv.NewBlock(info, steady.TotalHops),
+			Block: sbresv.NewBlock(info, steady.TotalHops, sbresv.Control),
 		},
 	}
 	if err := steady.ToRequest(pld); err != nil {
 		return nil, nil, err
+	}
+	// TODO: (rafflc) EphemSetup requests are sent over a steady reservation like here
+	// this is where the request is build, thus the sibra fields are written here
+	// pld should not be used like this since fields are possibly modified :)
+	keymac, err := util.GetAStoASHashKey("COLIBRI", s.dstIA, s.srcIA)
+	if err != nil {
+		return nil, nil, common.NewBasicError("Unable to derive key", err)
+	}
+	payload := make(common.RawBytes, pld.Len())
+	if _, err := pld.WritePld(payload); err != nil {
+		return nil, nil, common.NewBasicError("Failed to write payload", err)
+	}
+	err = steady.WriteSteadySource(keymac, payload)
+	if err != nil {
+		return nil, nil, common.NewBasicError("Unable to write steady reservation  in requesters mgr 1", err)
 	}
 	return steady, pld, nil
 }
@@ -280,17 +302,18 @@ func (s *EphemSetup) HandleRep(event notifyEvent) (bool, error) {
 	if _, ok := event.extn.(*sbextn.Steady); !ok {
 		return false, common.NewBasicError("Extension is not steady", nil)
 	}
+	steady := event.extn.(*sbextn.Steady)
 	if err := s.validate(nil, event.pld); err != nil {
 		return false, err
 	}
-	steady := event.extn.(*sbextn.Steady)
 	s.entry.Lock()
 	defer s.entry.Unlock()
 	switch r := event.pld.Data.(type) {
 	case *sbreq.EphemReq:
 		ids := []sibra.ID{r.ID}
 		ids = append(ids, steady.IDs...)
-		ephem, err := sbcreate.NewEphemUse(ids, steady.PathLens, r.Block, true)
+		nonce := util.GetNonce(steady.TimeStamp, steady.PldHash, steady.DVF)
+		ephem, err := sbcreate.NewEphemUse(ids, steady.PathLens, r.Block, true, s.srcIA, s.srcHost, nonce)
 		if err != nil {
 			return false, err
 		}
@@ -325,7 +348,7 @@ func (r *EphemRenew) PrepareRequest() (common.Extension, *sbreq.Pld, error) {
 			ephem.ActiveBlocks[0].Info.Index, "next", r.idx)
 	}
 	steady := r.entry.syncResv.Load().Steady
-	maxDuration := minTick(sibra.TimeToTick(steady.Expiry()), sibra.CurrentTick() + sibra.MaxEphemTicks)
+	maxDuration := minTick(sibra.TimeToTick(steady.Expiry()), sibra.CurrentTick()+sibra.MaxEphemTicks)
 	r.id = ephem.IDs[0]
 	info := &sbresv.Info{
 		ExpTick:  maxDuration,
@@ -334,18 +357,33 @@ func (r *EphemRenew) PrepareRequest() (common.Extension, *sbreq.Pld, error) {
 		RLC:      ephem.ActiveBlocks[0].Info.RLC,
 		Index:    r.idx,
 	}
+	// TODO: (rafflc) Initialize Authenticators
 	pld := &sbreq.Pld{
-		Type:      sbreq.REphmRenewal,
-		NumHops:   uint8(ephem.TotalHops),
-		TimeStamp: uint32(time.Now().Unix()),
-		Accepted:  true,
-		Auths:     make([]common.RawBytes, ephem.TotalHops),
+		Type:     sbreq.REphmRenewal,
+		NumHops:  uint8(ephem.TotalHops),
+		Accepted: true,
+		Auths:    make([]common.RawBytes, ephem.TotalHops),
 		Data: &sbreq.EphemReq{
-			Block: sbresv.NewBlock(info, ephem.TotalHops),
+			Block: sbresv.NewBlock(info, ephem.TotalHops, sbresv.Control),
 		},
 	}
 	if err := ephem.ToRequest(pld); err != nil {
 		return nil, nil, err
+	}
+	// TODO: (rafflc) EphemRenew requests are sent over the already existing
+	// ephem reservation. This is where the request is build, thus sibra fields are written here
+	// pld should not be used like this since fields are possibly modified :)
+	keymac, err := util.GetEtoEHashKey("COLIBRI", r.dstIA, r.srcIA, r.dstHost, r.srcHost)
+	if err != nil {
+		return nil, nil, common.NewBasicError("Unable to derive key", err)
+	}
+	payload := make(common.RawBytes, pld.Len())
+	if _, err := pld.WritePld(payload); err != nil {
+		return nil, nil, common.NewBasicError("Failed to write payload", err)
+	}
+	err = ephem.WriteEphemSource(keymac, payload)
+	if err != nil {
+		return nil, nil, common.NewBasicError("Unable to write ephem reservation", err)
 	}
 	return ephem, pld, nil
 }
@@ -366,7 +404,8 @@ func (r *EphemRenew) HandleRep(event notifyEvent) (bool, error) {
 	defer r.entry.Unlock()
 	switch request := event.pld.Data.(type) {
 	case *sbreq.EphemReq:
-		ephem, err := sbcreate.NewEphemUse(ephem.IDs, ephem.PathLens, request.Block, true)
+		nonce := util.GetNonce(ephem.TimeStamp, ephem.PldHash, ephem.DVF)
+		ephem, err := sbcreate.NewEphemUse(ephem.IDs, ephem.PathLens, request.Block, true, r.srcIA, r.srcHost, nonce)
 		if err != nil {
 			return false, err
 		}
@@ -424,6 +463,8 @@ type EphemCleanSetup struct {
 	*cleaner
 }
 
+// TODO: (rafflc) Deal with TimeStamp
+
 func (c *EphemCleanSetup) PrepareRequest() (common.Extension, *sbreq.Pld, error) {
 	c.entry.Lock()
 	defer c.entry.Unlock()
@@ -432,13 +473,14 @@ func (c *EphemCleanSetup) PrepareRequest() (common.Extension, *sbreq.Pld, error)
 		return nil, nil, common.NewBasicError("Steady extension not available", nil)
 	}
 	steady = steady.Copy().(*sbextn.Steady)
+	// TODO: (rafflc) Initialize Authenticators
 	pld := &sbreq.Pld{
-		Type:      sbreq.REphmCleanUp,
-		NumHops:   uint8(steady.TotalHops),
-		TimeStamp: uint32(time.Now().Unix()),
-		Accepted:  true,
-		Auths:     make([]common.RawBytes, steady.TotalHops),
-		Data: &sbreq.EphemClean {
+		Type:    sbreq.REphmCleanUp,
+		NumHops: uint8(steady.TotalHops),
+		//TimeStamp: uint32(time.Now().Unix()),
+		Accepted: true,
+		Auths:    make([]common.RawBytes, steady.TotalHops),
+		Data: &sbreq.EphemClean{
 			Setup: true,
 			ID:    c.id,
 			Info:  c.FailedInfo,
@@ -446,6 +488,22 @@ func (c *EphemCleanSetup) PrepareRequest() (common.Extension, *sbreq.Pld, error)
 	}
 	if err := steady.ToRequest(pld); err != nil {
 		return nil, nil, err
+	}
+	// TODO: (rafflc) EphemCleanSetup requests are sent over a steady reservation.
+	// This is where the request is build thus the sibra fields are written here.
+	// I suppose that EphemCleanSetup are used for failed setup requests, not sure though.
+	// pld should not be used like this since fields are possibly modified :)
+	keymac, err := util.GetAStoASHashKey("COLIBRI", c.dstIA, c.srcIA)
+	if err != nil {
+		return nil, nil, common.NewBasicError("Unable to derive key", err)
+	}
+	payload := make(common.RawBytes, pld.Len())
+	if _, err := pld.WritePld(payload); err != nil {
+		return nil, nil, common.NewBasicError("Failed to write payload", err)
+	}
+	err = steady.WriteSteadySource(keymac, payload)
+	if err != nil {
+		return nil, nil, common.NewBasicError("Unable to write steady reservation  in requesters mgr 1", err)
 	}
 	return steady, pld, nil
 }
@@ -461,6 +519,8 @@ type EphemCleanRenew struct {
 	*cleaner
 }
 
+// TODO: (rafflc) Deal with TimeStamp
+
 func (c *EphemCleanRenew) PrepareRequest() (common.Extension, *sbreq.Pld, error) {
 	c.entry.Lock()
 	defer c.entry.Unlock()
@@ -469,18 +529,34 @@ func (c *EphemCleanRenew) PrepareRequest() (common.Extension, *sbreq.Pld, error)
 		return nil, nil, common.NewBasicError("Ephemeral extension not available", nil)
 	}
 	ephem = ephem.Copy().(*sbextn.Ephemeral)
+	// TODO: (rafflc) Initialize Authenticators
 	pld := &sbreq.Pld{
-		Type:      sbreq.REphmCleanUp,
-		NumHops:   uint8(ephem.TotalHops),
-		TimeStamp: uint32(time.Now().Unix()),
-		Accepted:  true,
-		Auths:     make([]common.RawBytes, ephem.TotalHops),
+		Type:     sbreq.REphmCleanUp,
+		NumHops:  uint8(ephem.TotalHops),
+		Accepted: true,
+		Auths:    make([]common.RawBytes, ephem.TotalHops),
 		Data: &sbreq.EphemClean{
 			Info: c.FailedInfo,
 		},
 	}
 	if err := ephem.ToRequest(pld); err != nil {
 		return nil, nil, err
+	}
+	// TODO: (rafflc) EphemCleanRenew requests are sent over the already existing
+	// ephem reservation. This is where the request is build, thus sibra fields are written here.
+	// I suppose that EphemCleanRenew are used for failed renewal requests, not sure though.
+	// pld should not be used like this since fields are possibly modified :)
+	keymac, err := util.GetEtoEHashKey("COLIBRI", c.dstIA, c.srcIA, c.dstHost, c.srcHost)
+	if err != nil {
+		return nil, nil, common.NewBasicError("Unable to derive key", err)
+	}
+	payload := make(common.RawBytes, pld.Len())
+	if _, err := pld.WritePld(payload); err != nil {
+		return nil, nil, common.NewBasicError("Failed to write payload", err)
+	}
+	err = ephem.WriteEphemSource(keymac, payload)
+	if err != nil {
+		return nil, nil, common.NewBasicError("Unable to write ephem reservation", err)
 	}
 	return ephem, pld, nil
 }

@@ -15,9 +15,10 @@
 package resvmgr
 
 import (
-	"github.com/scionproto/scion/go/lib/assert"
 	"sync"
 	"time"
+
+	"github.com/scionproto/scion/go/lib/assert"
 
 	"github.com/scionproto/scion/go/lib/addr"
 	"github.com/scionproto/scion/go/lib/common"
@@ -138,7 +139,9 @@ func (r *resolver) setupNewPath(entry *resvEntry) (bool, error) {
 }
 
 // setupEphem starts setup requester. It assumes that entry is already locked.
+// IDEA: (rafflc) Does it really assume this? the requester again tries to lock it.
 func (r *resolver) setupEphem(entry *resvEntry, p *spathmeta.AppPath, sb *snet.Addr) (bool, error) {
+	log.Info("Setting up Ephemeral Reservation")
 	bwCls := entry.ephemMeta.maxBwCls
 	if entry.ephemMeta.lastFailCode != sbreq.FailCodeNone {
 		bwCls = maxBwCls(entry.ephemMeta.lastMaxBw, entry.ephemMeta.minBwCls)
@@ -198,6 +201,7 @@ func (r *resolver) handleSetupErr(entry *resvEntry, err error) {
 	r.refire(r.timers.ErrorRefire)
 }
 
+// handleSetupTimeout starts EphemCleanSetup requester.
 func (r *resolver) handleSetupTimeout(entry *resvEntry, request *sbreq.EphemReq, dstIa addr.IA,
 	sb *snet.Addr) {
 
@@ -251,6 +255,7 @@ func (r *resolver) needRenewal(ext *sbextn.Ephemeral, entry *resvEntry) bool {
 	return !sibra.CurrentTick().Add(1).Time().Before(ext.Expiry())
 }
 
+// renewEphem starts EphemRenew requester.
 func (r *resolver) renewEphem(entry *resvEntry, ext *sbextn.Ephemeral,
 	p *spathmeta.AppPath, sb *snet.Addr) (bool, error) {
 
@@ -308,7 +313,7 @@ func (r *resolver) handleRenewTimeoutRefire(entry *resvEntry, err error) {
 	log.Info("Handling timeout! refiring reservation!")
 	entry.Lock()
 	entry.Unlock()
-	entry.ephemMeta.state=ephemExists
+	entry.ephemMeta.state = ephemExists
 	r.notify(&Event{
 		Code:  Error,
 		Error: err,
@@ -452,7 +457,7 @@ func (r *resolver) getLocalSvcSB() (*snet.Addr, error) {
 func (r *resolver) notify(e *Event) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	assert.Must(e!=nil, "Event cannot be null!")
+	assert.Must(e != nil, "Event cannot be null!")
 	if !r.closed {
 		r.events <- e
 	}

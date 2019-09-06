@@ -18,6 +18,8 @@ import (
 	"fmt"
 	"hash"
 
+	"github.com/scionproto/scion/go/lib/addr"
+
 	"github.com/scionproto/scion/go/lib/common"
 	"github.com/scionproto/scion/go/lib/sibra"
 	"github.com/scionproto/scion/go/lib/sibra/sbresv"
@@ -68,11 +70,15 @@ func EphemReqFromRaw(raw common.RawBytes, setup bool, numHops int) (*EphemReq, e
 	return resvReq, nil
 }
 
-func (r *EphemReq) SetSOF(mac hash.Hash, ids []sibra.ID, plens []uint8,
-	inIFID, egIFID common.IFIDType, sofIdx int) error {
+func (r *EphemReq) SetSOF(mac hash.Hash, key, nonce common.RawBytes, Addr addr.IA,
+	ids []sibra.ID, plens []uint8, inIFID, egIFID common.IFIDType, sofIdx int) error {
+
+	r.Block.SOFields[sofIdx].Continue = true
 	r.Block.SOFields[sofIdx].Ingress = inIFID
 	r.Block.SOFields[sofIdx].Egress = egIFID
-	return r.Block.SetMac(mac, sofIdx, ids, plens)
+	r.Block.SOFields[sofIdx].Type = sbresv.Control
+	r.Block.SOFields[sofIdx].Address = Addr
+	return r.Block.SetHA(mac, key, nonce, sofIdx, ids, plens)
 }
 
 func (r *EphemReq) Fail(code FailCode, maxBw sibra.BwCls, failHop int) *EphemFailed {

@@ -19,6 +19,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/scionproto/scion/go/lib/util"
+
 	"github.com/scionproto/scion/go/lib/addr"
 	"github.com/scionproto/scion/go/lib/assert"
 	"github.com/scionproto/scion/go/lib/common"
@@ -29,10 +31,12 @@ import (
 	"github.com/scionproto/scion/go/lib/pathmgr"
 	"github.com/scionproto/scion/go/lib/sciond"
 	"github.com/scionproto/scion/go/lib/scmp"
+	"github.com/scionproto/scion/go/lib/sibra/sbextn"
 	"github.com/scionproto/scion/go/lib/sock/reliable"
 	"github.com/scionproto/scion/go/lib/spath"
 	"github.com/scionproto/scion/go/lib/spath/spathmeta"
 	"github.com/scionproto/scion/go/lib/spkt"
+	"github.com/scionproto/scion/go/sibrad/syncresv"
 )
 
 const (
@@ -164,6 +168,15 @@ func (c *Conn) read(b []byte, from bool) (int, *Addr, error) {
 	if err != nil {
 		return 0, nil, common.NewBasicError("SCION packet parse error", err)
 	}
+
+	// TODO: (rafflc) Add here validation of the received message. I guess if
+	// something failed, probably we just drop it and return en error?
+	// Caller then can decide what to do with it...
+
+	if err = c.validateSibraDestHost(pkt); err != nil {
+		return 0, nil, common.NewBasicError("Validating SIBRA packet failed", err)
+	}
+
 	// Copy data, extract address
 	n, err = pkt.Pld.WritePld(b)
 	if err != nil {
@@ -221,6 +234,53 @@ func getSibraExtn(pkt *spkt.ScnPkt) (common.Extension, error) {
 		}
 	}
 	return nil, nil
+}
+
+// REVIEW: (rafflc) Check extra fields at end host
+
+// TODO: (rafflc) Implement actual computation of PldHash
+
+// validateSibraDestHost validates PldHash, DVF and TS at Endhost for
+// packets sent over SIBRA.
+func (c *Conn) validateSibraDestHost(pkt *spkt.ScnPkt) error {
+	for _, ext := range pkt.HBHExt {
+		if ext.Type() == common.ExtnSIBRAType {
+			//SIBRA extension found
+			PldH, err := util.Calc32Hash(pkt.Pld.(common.RawBytes))
+			if err != nil {
+				return common.NewBasicError("Computing PldHash failed", err)
+			}
+			switch e := ext.(type) {
+			case *sbextn.Ephemeral:
+				var ephem *sbextn.Ephemeral
+				ephem = e
+				keymac, err := util.GetEtoEHashKey("COLIBRI", pkt.DstIA, pkt.SrcIA, pkt.DstHost, pkt.SrcHost)
+				if err != nil {
+					return common.NewBasicError("Unable to derive key", err)
+				}
+				if err := ephem.ValidateSibraDest(keymac, PldH); err != nil {
+					return common.NewBasicError("Invalid SIBRA fields", err)
+				}
+				return nil
+			// IDEA: (rafflc) Can steady requests even reach this port of the code?
+			case *sbextn.Steady:
+				var steady *sbextn.Steady
+				steady = e
+				keymac, err := util.GetAStoASHashKey("COLIBRI", pkt.DstIA, pkt.SrcIA)
+				if err != nil {
+					return common.NewBasicError("Unable to derive key", err)
+				}
+				if err := steady.ValidateSibraDest(keymac, PldH); err != nil {
+					return common.NewBasicError("Invalid SIBRA fields", err)
+				}
+				return nil
+			default:
+				return common.NewBasicError("Invalid Sibra extension type", nil, "type", e.Type())
+			}
+		}
+	}
+	//no SIBRA extension used
+	return nil
 }
 
 func (c *Conn) handleSCMP(hdr *scmp.Hdr, pkt *spkt.ScnPkt) {
@@ -297,7 +357,12 @@ func (c *Conn) write(b []byte, raddr *Addr) (int, error) {
 	// If src and dst are in the same AS, the path will be empty
 	if !c.laddr.IA.Eq(raddr.IA) {
 		if raddr.SibraResv != nil {
-			raddr.Sibra, usePath = raddr.SibraResv.Load().GetExtn()
+
+			// REVISE: (rafflc) Write fields here
+			raddr.Sibra, usePath, err = c.writeSibraSource(b, raddr, raddr.SibraResv.Load())
+			if err != nil {
+				return 0, common.NewBasicError("Failed to write Sibra fields", err)
+			}
 		}
 		if raddr.Sibra != nil && raddr.NextHopHost != nil && raddr.NextHopPort != 0 {
 			if usePath {
@@ -398,6 +463,42 @@ func (c *Conn) selectPathEntry(raddr *Addr) (*sciond.PathReplyEntry, error) {
 	path := pathSet.GetAppPath(c.prefPathKey)
 	c.prefPathKey = path.Key()
 	return path.Entry, nil
+}
+
+// TODO: (rafflc) Im not 100% sure but I think we have to copy the extension here
+// since we have to modify the Mac and do not want to destroy the store
+
+//writeSibraSource checks if extension is ephem or steady
+//then writes PldHash, DVF, TS and all MAC for the OF and returns if path set or not
+func (c *Conn) writeSibraSource(b []byte, raddr *Addr, ext *syncresv.Data) (common.Extension, bool, error) {
+	now := time.Now()
+	if ext.Ephemeral != nil && ext.Ephemeral.Expiry().After(now) {
+		ephem := ext.Ephemeral
+		ephem = ephem.Copy().(*sbextn.Ephemeral)
+		keymac, err := util.GetEtoEHashKey("COLIBRI", raddr.IA, c.laddr.IA, raddr.Host, c.laddr.Host)
+		if err != nil {
+			return nil, true, common.NewBasicError("Unable to derive key", err)
+		}
+		err = ephem.WriteEphemSource(keymac, b)
+		if err != nil {
+			return nil, true, common.NewBasicError("Unable to write ephemeral reservation", err)
+		}
+		return ephem, false, nil
+	}
+	if ext.Steady != nil && ext.Steady.Expiry().After(now) {
+		steady := ext.Steady
+		steady = steady.Copy().(*sbextn.Steady)
+		keymac, err := util.GetAStoASHashKey("COLIBRI", raddr.IA, c.laddr.IA)
+		if err != nil {
+			return nil, true, common.NewBasicError("Unable to derive key", err)
+		}
+		err = steady.WriteSteadySource(keymac, b)
+		if err != nil {
+			return nil, true, common.NewBasicError("Unable to write steady reservation in conn", err)
+		}
+		return steady, ext.Steady.Setup, nil
+	}
+	return nil, true, common.NewBasicError("Invalid Sibra extension type", nil)
 }
 
 func (c *Conn) BindAddr() net.Addr {

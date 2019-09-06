@@ -19,6 +19,9 @@ import (
 	"hash"
 	"time"
 
+	"github.com/scionproto/scion/go/lib/addr"
+	"github.com/scionproto/scion/go/lib/util"
+
 	"github.com/scionproto/scion/go/lib/assert"
 	"github.com/scionproto/scion/go/lib/common"
 	"github.com/scionproto/scion/go/lib/sibra"
@@ -66,11 +69,26 @@ func calcMinBlockLen(numHops int) int {
 	return InfoLen + numHops*common.LineLen
 }
 
-func NewBlock(info *Info, numHops int) *Block {
+func NewBlock(info *Info, numHops int, softype SOFType) *Block {
 	fields := make([]*SOField, numHops)
-	for i := 0; i < len(fields); i++ {
-		fields[i] = &SOField{
-			Mac: make(common.RawBytes, MacLen),
+	switch softype {
+	case Data:
+		for i := 0; i < len(fields); i++ {
+			fields[i] = &SOField{
+				HVF: make(common.RawBytes, HVFLen),
+			}
+		}
+	case Control:
+		for i := 0; i < len(fields); i++ {
+			fields[i] = &SOField{
+				HopAuthenticator: make(common.RawBytes, HALen),
+			}
+		}
+	case Reservation:
+		for i := 0; i < len(fields); i++ {
+			fields[i] = &SOField{
+				HopAuthenticator: make(common.RawBytes, HALen),
+			}
 		}
 	}
 	return &Block{
@@ -79,7 +97,8 @@ func NewBlock(info *Info, numHops int) *Block {
 	}
 }
 
-func (b *Block) Verify(mac hash.Hash, sofIdx int, ids []sibra.ID, pLens []uint8, now time.Time) error {
+func (b *Block) Verify(svA hash.Hash, sofIdx int, ids []sibra.ID, pLens []uint8,
+	PldHash common.RawBytes, TS uint32, now time.Time) error {
 	if sofIdx < 0 || sofIdx >= b.NumHops() {
 		return common.NewBasicError("SofIndex out of range", nil, "min", 0,
 			"max", b.NumHops(), "actual", sofIdx)
@@ -88,27 +107,85 @@ func (b *Block) Verify(mac hash.Hash, sofIdx int, ids []sibra.ID, pLens []uint8,
 		return common.NewBasicError("Reservation expired", nil,
 			"now", now, "exp", b.Info.ExpTick.Time())
 	}
-	var sof common.RawBytes
-	if b.Info.PathType.GenFwd() && sofIdx > 0 {
-		sof = b.SOFields[sofIdx-1].Pack()
-	} else if !b.Info.PathType.GenFwd() && sofIdx < (b.NumHops()-1) {
-		sof = b.SOFields[sofIdx+1].Pack()
-	}
-	return b.SOFields[sofIdx].Verify(mac, b.Info, ids, pLens, sof)
+	// return b.SOFields[sofIdx].VerifyHVF(svA, b.Info, ids, pLens, PldHash, TS)
+	return nil
 }
 
-func (b *Block) SetMac(mac hash.Hash, sofIdx int, ids []sibra.ID, pLens []uint8) error {
+// SetHA takes the mac, key & nonce and sets the HA for all SOF
+func (b *Block) SetHA(mac hash.Hash, key, nonce common.RawBytes,
+	sofIdx int, ids []sibra.ID, pLens []uint8) error {
 	if sofIdx < 0 || sofIdx >= b.NumHops() {
 		return common.NewBasicError("SofIndex out of range", nil, "min", 0,
 			"max", b.NumHops(), "actual", sofIdx)
 	}
-	var sof common.RawBytes
-	if b.Info.PathType.GenFwd() && sofIdx > 0 {
-		sof = b.SOFields[sofIdx-1].Pack()
-	} else if !b.Info.PathType.GenFwd() && sofIdx < (b.NumHops()-1) {
-		sof = b.SOFields[sofIdx+1].Pack()
+
+	//REVISE: (rafflc) SetMac is now SetHA
+	return b.SOFields[sofIdx].SetHA(mac, key, nonce, b.Info, ids, pLens)
+}
+
+// ToData takes the PldHash and the TS of the packet and transforms all Reservation
+// SOF to Data SOF
+func (b *Block) ToData(PldHash common.RawBytes, TS uint32) error {
+	for _, sof := range b.SOFields {
+		if err := sof.ToData(PldHash, TS); err != nil {
+			return err
+		}
 	}
-	return b.SOFields[sofIdx].SetMac(mac, b.Info, ids, pLens, sof)
+	return nil
+}
+
+// ToReservation takes a control Block and modifies it to a
+// reservation Block by decrypting the HA in all SOFs
+func (b *Block) EphemToReservation(AS addr.IA, Host addr.HostAddr, nonce common.RawBytes) error {
+	switch b.Info.PathType {
+	case sibra.PathTypeEphemeral:
+		for _, sof := range b.SOFields {
+			l1key, err := util.DeriveASKeyL1(sof.Address, AS)
+			if err != nil {
+				return common.NewBasicError("Unable to derive key", err)
+			}
+			l2key, err := util.DeriveASKeyL2(l1key, nil, Host, true, false, "COLIBRI")
+			if err != nil {
+				return common.NewBasicError("Unable to derive key", err)
+			}
+			if err := sof.ToReservation(l2key, nonce); err != nil {
+				return err
+			}
+		}
+	default:
+		return common.NewBasicError("Ephemeral reservation exptected", nil)
+	}
+	return nil
+}
+
+func (b *Block) SteadyToReservation() error {
+	switch b.Info.PathType {
+	case sibra.PathTypeEphemeral:
+		return common.NewBasicError("Steady reservation expected", nil)
+	default:
+		for _, sof := range b.SOFields {
+			if err := sof.SteadyToReservation(); err != nil {
+				return err
+			}
+		}
+		// for _, sof := range b.SOFields {
+		// 	l1key, err := util.DeriveASKeyL1(sof.Address, AS)
+		// 	if err != nil {
+		// 		return common.NewBasicError("Unable to derive key", err)
+		// 	}
+		// 	l2key, err := util.DeriveASKeyL2(l1key, nil, nil, true, true, "COLIBRI")
+		// 	if err != nil {
+		// 		return common.NewBasicError("Unable to derive key", err)
+		// 	}
+		// 	if err := sof.ToReservation(l2key, nonce); err != nil {
+		// 		return err
+		// 	}
+		// 	if err := sof.ToReservation(l2key, nonce); err != nil {
+		// 		return err
+		// 	}
+		// }
+	}
+	return nil
 }
 
 func (b *Block) NumHops() int {

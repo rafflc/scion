@@ -12,6 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// This file handles incoming packets.
+// If it is a reply to an eariler request, the according requester gets notified
+// If it is a request from another sibrad, it gets either admitted or not
+// and the according reply gets sent
+
 package resvmgr
 
 import (
@@ -29,6 +34,7 @@ import (
 	"github.com/scionproto/scion/go/lib/sibra/sbreq"
 	"github.com/scionproto/scion/go/lib/snet"
 	"github.com/scionproto/scion/go/lib/spkt"
+	"github.com/scionproto/scion/go/lib/util"
 )
 
 var _ infra.Handler = (*ephemRepHandler)(nil)
@@ -79,6 +85,11 @@ func (h *ephemRepHandler) handle(saddr *snet.Addr, pld *sibra_mgmt.EphemRep) err
 	if err != nil {
 		return err
 	}
+
+	if err := validate(pkt, base); err != nil {
+		return common.NewBasicError("Packet validation failed", err)
+	}
+
 	log.Debug("Received event", "addr", saddr, "extn", event.extn, "pld", event.pld)
 	key, err := h.getNotifyKey(base, event.pld)
 	if err != nil {
@@ -163,6 +174,11 @@ func (h *ephemReqHandler) handle(saddr *snet.Addr, pld *sibra_mgmt.EphemReq) (*s
 	if err != nil {
 		return nil, err
 	}
+
+	if err := validate(pkt, base); err != nil {
+		return nil, common.NewBasicError("Packet validation failed", err)
+	}
+
 	log.Debug("Received event", "addr", saddr, "extn", event.extn, "pld", event.pld)
 	ok, err := h.checkWhitelist(pkt.SrcIA, pkt.SrcHost.IP(), event.pld, base.CurrHop)
 	if err != nil {
@@ -182,6 +198,35 @@ func (h *ephemReqHandler) handle(saddr *snet.Addr, pld *sibra_mgmt.EphemReq) (*s
 		return nil, err
 	}
 	pkt.Pld = event.pld
+	// TODO (rafflc) Write SIBRA fields at source. Deal with PldHash somehow
+	payload := make(common.RawBytes, pkt.Pld.Len())
+	if _, err := pkt.Pld.WritePld(payload); err != nil {
+		return nil, common.NewBasicError("Failed to write payload", err)
+	}
+	for _, ext := range pkt.HBHExt {
+		if ext.Type() == common.ExtnSIBRAType {
+			switch ext.(type) {
+			case *sbextn.Ephemeral:
+				keymac, err := util.GetEtoEHashKey("COLIBRI", pkt.DstIA, pkt.SrcIA, pkt.DstHost, pkt.SrcHost)
+				if err != nil {
+					return nil, common.NewBasicError("Unable to derive key", err)
+				}
+				err = (ext.(*sbextn.Ephemeral)).WriteEphemSource(keymac, payload)
+				if err != nil {
+					return nil, common.NewBasicError("Unable to write ephemeral reservation", err)
+				}
+			case *sbextn.Steady:
+				keymac, err := util.GetAStoASHashKey("COLIBRI", pkt.DstIA, pkt.SrcIA)
+				if err != nil {
+					return nil, common.NewBasicError("Unable to derive key", err)
+				}
+				err = (ext.(*sbextn.Steady)).WriteSteadySource(keymac, payload)
+				if err != nil {
+					return nil, common.NewBasicError("Unable to write steady reservation in infra_handlers", err)
+				}
+			}
+		}
+	}
 	return pkt, nil
 }
 
@@ -246,4 +291,36 @@ func parseRep(pkt *spkt.ScnPkt) (notifyEvent, *sbextn.Base, error) {
 		pld:  pld,
 	}
 	return event, base, nil
+}
+
+// REVISE (rafflc) Checks of sibrafields of all incoming requests to local sibrad
+// validate checks the sibra fields of a packet
+func validate(pkt *spkt.ScnPkt, base *sbextn.Base) error {
+	PldH, err := util.Calc32Hash(pkt.Pld.(common.RawBytes))
+	if err != nil {
+		return common.NewBasicError("Computing PldHash failed", err)
+	}
+	if base.Steady {
+		steady := &sbextn.Steady{Base: base}
+		keymac, err := util.GetAStoASHashKey("COLIBRI", pkt.DstIA, pkt.SrcIA)
+		if err != nil {
+			return common.NewBasicError("Unable to derive key", err)
+		}
+		if err := steady.ValidateSibraDest(keymac, PldH); err != nil {
+			return common.NewBasicError("Invalid SIBRA fields", err)
+		}
+	} else {
+		ephem := &sbextn.Ephemeral{Base: base}
+		ephem.Base = base
+		keymac, err := util.GetEtoEHashKey("COLIBRI", pkt.DstIA, pkt.SrcIA, pkt.DstHost, pkt.SrcHost)
+		if err != nil {
+			return common.NewBasicError("Unable to derive key", err)
+		}
+		if err := ephem.ValidateSibraDest(keymac, PldH); err != nil {
+			return common.NewBasicError("Invalid SIBRA fields", err)
+		}
+	}
+	return nil
+
+	//TODO: (rafflc) Maybe check here authenticators
 }

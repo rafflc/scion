@@ -15,8 +15,6 @@
 package rpkt
 
 import (
-	"github.com/scionproto/scion/go/lib/sibra/flowmonitor"
-	"github.com/scionproto/scion/go/proto"
 	"hash"
 	"time"
 
@@ -27,13 +25,16 @@ import (
 	"github.com/scionproto/scion/go/lib/addr"
 	"github.com/scionproto/scion/go/lib/common"
 	"github.com/scionproto/scion/go/lib/ctrl/sibra_mgmt"
+	"github.com/scionproto/scion/go/lib/log"
 	"github.com/scionproto/scion/go/lib/overlay"
 	"github.com/scionproto/scion/go/lib/ringbuf"
 	"github.com/scionproto/scion/go/lib/sibra"
+	"github.com/scionproto/scion/go/lib/sibra/flowmonitor"
 	"github.com/scionproto/scion/go/lib/topology"
+	"github.com/scionproto/scion/go/proto"
 )
 
-type SIBRACallbackArgs interface{
+type SIBRACallbackArgs interface {
 	GetCerealizablePacket() proto.Cerealizable
 	Get()
 	Put()
@@ -44,15 +45,15 @@ type SIBRAExternalPacket struct {
 	RtrPkt *RtrPkt
 }
 
-func (pckt SIBRAExternalPacket) GetCerealizablePacket() proto.Cerealizable{
+func (pckt SIBRAExternalPacket) GetCerealizablePacket() proto.Cerealizable {
 	return &sibra_mgmt.ExternalPkt{RawPkt: pckt.RtrPkt.Raw}
 }
 
-func (pckt SIBRAExternalPacket) Get(){
+func (pckt SIBRAExternalPacket) Get() {
 	pckt.RtrPkt.RefInc(1)
 }
 
-func (pckt SIBRAExternalPacket) Put(){
+func (pckt SIBRAExternalPacket) Put() {
 	pckt.RtrPkt.Release()
 }
 
@@ -61,15 +62,15 @@ type SIBRAInternalPacket struct {
 	Payload proto.Cerealizable
 }
 
-func (pckt SIBRAInternalPacket) GetCerealizablePacket() proto.Cerealizable{
+func (pckt SIBRAInternalPacket) GetCerealizablePacket() proto.Cerealizable {
 	return pckt.Payload
 }
 
-func (pckt SIBRAInternalPacket) Get(){
+func (pckt SIBRAInternalPacket) Get() {
 	// We don't have ref counting here
 }
 
-func (pckt SIBRAInternalPacket) Put(){
+func (pckt SIBRAInternalPacket) Put() {
 	// We don't have ref counting here
 }
 
@@ -86,6 +87,12 @@ func (r *RtrPkt) processSibraMgmtSelf(p *sibra_mgmt.Pld) (HookResult, error) {
 	return HookContinue, nil
 }
 
+// VerifySOF validates sibra packets at the border router.
+// It is appended to the validation hook for all non segment setup requests
+// Validated are:
+// - ExpTick
+// - TimeStamp
+// - SOF
 func (s *rSibraExtn) VerifySOF() (HookResult, error) {
 	// validate reservation has not expired
 	now := time.Now()
@@ -93,7 +100,15 @@ func (s *rSibraExtn) VerifySOF() (HookResult, error) {
 		return HookError, common.NewBasicError("Reservation expired", nil,
 			"now", now, "exp", s.Info().ExpTick.Time(), "fwd", s.Forward)
 	}
-	// validate hop fields
+
+	// REVIEW: (rafflc) Check of timestamp for non segment setup requests
+
+	//validate TimeStamp
+	if err := s.validateTimeStamp(); err != nil {
+		return HookError, common.NewBasicError("Timestamp incorrect", err)
+	}
+
+	// validate SOF of this hop
 	pLens := []uint8{s.PathLens[s.CurrSteady]}
 	ids := []sibra.ID{s.IDs[s.CurrSteady]}
 	if !s.Steady {
@@ -101,7 +116,7 @@ func (s *rSibraExtn) VerifySOF() (HookResult, error) {
 		ids = s.IDs
 	}
 	sofMac := s.rp.Ctx.Conf.SOFMacPool.Get().(hash.Hash)
-	err := s.SOF().Verify(sofMac, s.Info(), ids, pLens, s.RawVerifyingSOF())
+	err := s.SOF().VerifyHVF(sofMac, s.Info(), ids, pLens, s.PldHash, s.TimeStamp)
 	s.rp.Ctx.Conf.SOFMacPool.Put(sofMac)
 	if err != nil {
 		return HookError, err
@@ -109,6 +124,7 @@ func (s *rSibraExtn) VerifySOF() (HookResult, error) {
 	return HookContinue, nil
 }
 
+// RouteSibraRequest is added as Routing hook for all sibra request packets
 func (s *rSibraExtn) RouteSibraRequest() (HookResult, error) {
 	if s.rp.DirFrom == rcmn.DirExternal {
 		callbacks.sibraF(SIBRAExternalPacket{RtrPkt: s.rp})
@@ -122,6 +138,7 @@ func (s *rSibraExtn) RouteSibraRequest() (HookResult, error) {
 	return s.forwardFromLocal()
 }
 
+// RouteSibraData is added as Routing hook for all sibra data packets
 func (s *rSibraExtn) RouteSibraData() (HookResult, error) {
 	switch s.rp.DirFrom {
 	case rcmn.DirExternal:
@@ -137,17 +154,17 @@ func (s *rSibraExtn) RouteSibraData() (HookResult, error) {
 func (s *rSibraExtn) VerifyLocalFlowBW() (HookResult, error) {
 	s.rp.SrcIA()
 
-	flowInfo :=flowmonitor.FlowInfo{
-		BwCls:s.Info().BwCls,
-		PacketSize:len(s.rp.Raw),
-		ReservationId:s.IDs[0],
-		ReservationIndex:s.Info().Index,
-		SourceIA:s.rp.srcIA,
+	flowInfo := flowmonitor.FlowInfo{
+		BwCls:            s.Info().BwCls,
+		PacketSize:       len(s.rp.Raw),
+		ReservationId:    s.IDs[0],
+		ReservationIndex: s.Info().Index,
+		SourceIA:         s.rp.srcIA,
 	}
 
-	if callbacks.bandwidthLimitF(flowInfo, true){
-		return HookError, common.NewBasicError("Reserved bandwidht limit exceeded.",nil)
-	}else{
+	if callbacks.bandwidthLimitF(flowInfo, true) {
+		return HookError, common.NewBasicError("Reserved bandwidht limit exceeded.", nil)
+	} else {
 		return HookContinue, nil
 	}
 }
@@ -155,17 +172,17 @@ func (s *rSibraExtn) VerifyLocalFlowBW() (HookResult, error) {
 func (s *rSibraExtn) VerifyTransitFlowBW() (HookResult, error) {
 	s.rp.SrcIA()
 
-	flowInfo :=flowmonitor.FlowInfo{
-		BwCls:s.Info().BwCls,
-		PacketSize:len(s.rp.Raw),
-		ReservationId:s.IDs[0],
-		ReservationIndex:s.Info().Index,
-		SourceIA:s.rp.srcIA,
+	flowInfo := flowmonitor.FlowInfo{
+		BwCls:            s.Info().BwCls,
+		PacketSize:       len(s.rp.Raw),
+		ReservationId:    s.IDs[0],
+		ReservationIndex: s.Info().Index,
+		SourceIA:         s.rp.srcIA,
 	}
 
-	if callbacks.bandwidthLimitF(flowInfo, false){
-		return HookError, common.NewBasicError("Reserved bandwidht limit exceeded.",nil)
-	}else{
+	if callbacks.bandwidthLimitF(flowInfo, false) {
+		return HookError, common.NewBasicError("Reserved bandwidht limit exceeded.", nil)
+	} else {
 		return HookContinue, nil
 	}
 }
@@ -211,7 +228,7 @@ func (s *rSibraExtn) forwardFromExternal() (HookResult, error) {
 		s.rp.Egress = append(s.rp.Egress, EgressPair{s.rp.Ctx.LocSockOut, dst})
 	}
 
-	if !s.BestEffort{
+	if !s.BestEffort {
 		metrics.COLIBRIEphTrafficIn.With(
 			prometheus.Labels{"direction": "external"}).Add(float64(s.Len()))
 	}
@@ -259,4 +276,50 @@ func (s *rSibraExtn) egress() (HookResult, error) {
 			prometheus.Labels{"inSock": inSock, "outSock": epair.S.Labels["sock"]}).Inc()
 	}
 	return HookFinish, nil
+}
+
+// validateTimeStamp checks if not too much time since creation of packet has elapsed.
+// It does not handle segment setup requests
+func (s *rSibraExtn) validateTimeStamp() error {
+	now := time.Now()
+	var nanoexpiration, nanotimestamp, hops uint64
+	//get the number of hops already passed
+	if s.Forward {
+		hops = uint64(s.CurrHop + 1)
+	} else {
+		hops = uint64(s.TotalHops - s.CurrHop)
+	}
+	//convert the expiration tick in the first info field to Nanoseconds
+	// first check if empty to avoid nullpointer exception
+	if len(s.ActiveBlocks) < 1 {
+		log.Debug("Empty packet received", "id", s.IDs, "steady", s.Steady,
+			"forward", s.Forward, "BestEffort", s.BestEffort, "Request", s.IsRequest,
+			"Version", s.Version, "SOFIndex", s.SOFIndex, "Pathlens", s.PathLens,
+			"CurHop", s.CurrHop, "TotalHops", s.TotalHops, "CurrSteady", s.CurrSteady,
+			"RelSOFIdy", s.RelSteadyHop, "TotalSteady", s.TotalSteady, "Block", s.ActiveBlocks)
+		return nil
+	}
+
+	nanoexpiration = uint64(s.ActiveBlocks[0].Info.ExpTick) * sibra.ExpTicktoNano
+	//convert the TimeStamp to Nanoseconds
+	if s.Steady {
+		nanotimestamp = uint64(float64(s.TimeStamp) * sibra.TStoNanoSteady)
+	} else {
+		nanotimestamp = uint64(float64(s.TimeStamp) * sibra.TStoNanoEphem)
+	}
+	//get the actual construction time
+	constructed := nanoexpiration - nanotimestamp
+	//check if too much time elapsed. request packets have more time
+	if s.IsRequest {
+		if constructed+sibra.MaxRequestHop*uint64(hops) < uint64(now.UnixNano()) {
+			return common.NewBasicError("Too much time elapsed since packet construction", nil,
+				"now", now, "constructed", time.Unix(0, int64(constructed)))
+		}
+	} else {
+		if constructed+sibra.MaxDataHop*uint64(hops) < uint64(now.UnixNano()) {
+			return common.NewBasicError("Too much time elapsed since packet construction", nil,
+				"now", now, "constructed", time.Unix(0, int64(constructed)))
+		}
+	}
+	return nil
 }

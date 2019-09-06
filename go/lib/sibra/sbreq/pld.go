@@ -14,6 +14,9 @@
 
 // Package sbreq provides the implementation for the SIBRA request
 // payload.
+
+// REVIEW: (rafflc) Removal of TimeStamp from request payload
+
 package sbreq
 
 import (
@@ -24,32 +27,52 @@ import (
 )
 
 const (
+	// IDEA: (rafflc) The length is differnet here from the description
+	// in the thesis. Asked Dominik about it, he said 16 is correct
+
 	AuthLen = 16
 
-	minLen = common.LineLen
+	// REVISE: (rafflc) Removed TimeStamp from Payload, thus minLen -4
+
+	minLen = common.LineLen - 4
 
 	flagAccepted = 0x20
 	flagResponse = 0x10
 	flagType     = 0x0F
 )
 
+// REVISE: (rafflc) I am pretty confident that the Flags and the Type are switched
+// and not as defined in the thesis.
+// Authenticator in the sketch have been 8 bytes, altough they should be 16
+
 var _ common.Payload = (*Pld)(nil)
 
-// Base is the basis for SIBRA request. It can either be a request
+// Pld is the basis for SIBRA request. It can either be a request
 // or a response for a request.
 //
 // 0B       1        2        3        4        5        6        7
 // +--------+--------+--------+--------+--------+--------+--------+--------+
-// |    Total Len    |Typ|--AR| NumHops|           TimeStamp               |
+// |    Total Len    |--AR|Typ| NumHops|               Data                |
 // +--------+--------+--------+--------+--------+--------+--------+--------+
 // |	Data (var len.)													   |
 // +--------+--------+--------+--------+--------+--------+--------+--------+
 // | Authenticator 1													   |
 // +--------+--------+--------+--------+--------+--------+--------+--------+
+// | Authenticator 1 cont.												   |
+// +--------+--------+--------+--------+--------+--------+--------+--------+
 // | Authenticator 2													   |
 // +--------+--------+--------+--------+--------+--------+--------+--------+
+// | Authenticator 2 cont												   |
+// +--------+--------+--------+--------+--------+--------+--------+--------+
 //
+
+// REVISE: (rafflc) Reorder struct in order to achieve better aligning?
+
 type Pld struct {
+	// Auths is a list of authenticators.
+	Auths []common.RawBytes
+	// Data is the request data
+	Data Data
 	// TotalLen is the byte length of the payload.
 	TotalLen uint16
 	// Type indicates the type of request.
@@ -60,13 +83,10 @@ type Pld struct {
 	Accepted bool
 	// Response indicates if this is a response.
 	Response bool
-	// TimeStamp indicates the creation time of the request.
-	TimeStamp uint32
-	// Data is the request data
-	Data Data
-	// Auths is a list of authenticators.
-	Auths []common.RawBytes
 }
+
+// IDEA: (rafflc) Since this is in the payload part of the SCION packet,
+// I think there is no alinging to 8 bytes required
 
 func PldFromRaw(raw common.RawBytes) (*Pld, error) {
 	if len(raw) < minLen {
@@ -74,12 +94,11 @@ func PldFromRaw(raw common.RawBytes) (*Pld, error) {
 			"min", minLen, "actual", len(raw))
 	}
 	b := &Pld{
-		TotalLen:  common.Order.Uint16(raw[:2]),
-		Type:      DataType(raw[2] & flagType),
-		Response:  (raw[2] & flagResponse) != 0,
-		Accepted:  (raw[2] & flagAccepted) != 0,
-		NumHops:   raw[3],
-		TimeStamp: common.Order.Uint32(raw[4:8]),
+		TotalLen: common.Order.Uint16(raw[:2]),
+		Type:     DataType(raw[2] & flagType),
+		Response: (raw[2] & flagResponse) != 0,
+		Accepted: (raw[2] & flagAccepted) != 0,
+		NumHops:  raw[3],
 	}
 	if len(raw) != int(b.TotalLen) {
 		return nil, common.NewBasicError("Invalid request pld length", nil,
@@ -161,14 +180,16 @@ func (p *Pld) reverseSteadyReq() error {
 	info := req.Info.Copy()
 	info.BwCls = req.AccBw
 	p.Data = &SteadySucc{
-		Block:    sbresv.NewBlock(info, int(p.NumHops)),
+		Block:    sbresv.NewBlock(info, int(p.NumHops), sbresv.Control),
 		DataType: p.Type,
 	}
 	return nil
 }
 
+// REVIEW: (rafflc) Change length computation to account for removal of TS
+
 func (p *Pld) Len() int {
-	l := common.LineLen + len(p.Auths)*AuthLen
+	l := minLen + len(p.Auths)*AuthLen
 	if p.Data != nil {
 		return l + p.Data.Len()
 	}
@@ -184,17 +205,21 @@ func (p *Pld) Copy() (common.Payload, error) {
 	return PldFromRaw(b)
 }
 
+// REVIEW: (rafflc) Change offsets to account for removal of TS
+
 func (p *Pld) WritePld(raw common.RawBytes) (int, error) {
 	if p.Data == nil {
 		return 0, common.NewBasicError("Data must not be nil", nil, "method", "sbreq.Pld.Write")
 	}
-	authOff := common.LineLen + p.Data.Len()
-	minLen := p.Len()
-	if len(raw) < minLen {
-		return 0, common.NewBasicError("Buffer to short", nil, "method", "sbreq.Pld.Write",
-			"min", minLen, "actual", len(raw))
+	authOff := minLen + p.Data.Len()
+
+	// REVIEW: (rafflc) Why had this variable the same name as a constant defined in this file?!
+	bufferLen := p.Len()
+	if len(raw) < bufferLen {
+		return 0, common.NewBasicError("Buffer too short", nil, "method", "sbreq.Pld.Write",
+			"min", bufferLen, "actual", len(raw))
 	}
-	common.Order.PutUint16(raw[:2], uint16(minLen))
+	common.Order.PutUint16(raw[:2], uint16(bufferLen))
 	raw[2] = byte(p.Type)
 	if p.Response {
 		raw[2] |= flagResponse
@@ -203,13 +228,17 @@ func (p *Pld) WritePld(raw common.RawBytes) (int, error) {
 		raw[2] |= flagAccepted
 	}
 	raw[3] = p.NumHops
-	common.Order.PutUint32(raw[4:8], p.TimeStamp)
-	p.Data.Write(raw[common.LineLen:authOff])
+	p.Data.Write(raw[minLen:authOff])
 	off, end := authOff, authOff+AuthLen
+
+	// REVIEW: (rafflc) I think this was missing
+	// If it really was wrong, the authenticators have probably never been tested.
+	// Update: This has not been implemented so far
 	for _, v := range p.Auths {
 		copy(raw[off:end], v)
+		off, end = end, end+AuthLen
 	}
-	return minLen, nil
+	return bufferLen, nil
 }
 
 func (p *Pld) String() string {

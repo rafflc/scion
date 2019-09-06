@@ -12,6 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// IDEA: (rafflc) This file handles ephemeral request packets in the
+// sibra_srv. Packets are being forwarded to here either by border
+// routers (transfer/transit/end AS) or by the client (start AS)
+
 package adm
 
 import (
@@ -19,6 +23,7 @@ import (
 	"hash"
 	"time"
 
+	"github.com/scionproto/scion/go/lib/addr"
 	"github.com/scionproto/scion/go/lib/assert"
 	"github.com/scionproto/scion/go/lib/common"
 	"github.com/scionproto/scion/go/lib/ctrl/sibra_mgmt"
@@ -29,6 +34,7 @@ import (
 	"github.com/scionproto/scion/go/lib/sibra/sbextn"
 	"github.com/scionproto/scion/go/lib/sibra/sbreq"
 	"github.com/scionproto/scion/go/lib/snet"
+	libutil "github.com/scionproto/scion/go/lib/util"
 	"github.com/scionproto/scion/go/sibra_srv/conf"
 	"github.com/scionproto/scion/go/sibra_srv/sbalgo"
 	"github.com/scionproto/scion/go/sibra_srv/util"
@@ -41,6 +47,13 @@ type EphemHandler struct{}
 //////////////////////////////////////////
 // Handle Reservation at the end AS
 /////////////////////////////////////////
+
+// TODO: (rafflc) check and write the SIBRA fields for the reverseAndForward function
+// Also, at the beginning everywhere, check the authenticators :)
+
+// IDEA: (rafflc) Is using the reservations in the ExtPkt on its own not a problem?
+// e.g. when reversing the pkt, the extension in the spkt are not being inverted.
+// I suppose that could lead to problems, but dunno
 
 func (h *EphemHandler) HandleSetupResvReqEndAS(pkt *conf.ExtPkt) error {
 	log.Debug("Handling ephemeral setup request on end AS", "ids", pkt.Steady.IDs)
@@ -363,8 +376,17 @@ func admitSetupEphemResv(pkt *conf.ExtPkt) error {
 		ids := make([]sibra.ID, 1, 4)
 		ids[0] = pkt.Pld.Data.(*sbreq.EphemReq).ID
 		ids = append(ids, pkt.Steady.IDs...)
-		err = issueSOF(pkt.Pld.Data.(*sbreq.EphemReq), ids, pkt.Steady.PathLens, ifids,
-			pkt.Steady.CurrHop, pkt.Conf)
+		l1key, err := libutil.DeriveASKeyL1(pkt.Addr.IA, pkt.Spkt.DstIA)
+		if err != nil {
+			return common.NewBasicError("Unable to derive key", err)
+		}
+		l2key, err := libutil.DeriveASKeyL2(l1key, nil, nil, true, true, "COLIBRI")
+		if err != nil {
+			return common.NewBasicError("Unable to derive key", err)
+		}
+		nonce := libutil.GetNonce(pkt.Steady.TimeStamp, pkt.Steady.PldHash, pkt.Steady.DVF)
+		err = issueSOF(pkt.Pld.Data.(*sbreq.EphemReq), l2key, nonce, pkt.Addr.IA, ids,
+			pkt.Steady.PathLens, ifids, pkt.Steady.CurrHop, pkt.Conf)
 		if assert.On && err != nil {
 			assert.Must(err == nil, "issueSOF must not fail", "err", err)
 		}
@@ -385,8 +407,17 @@ func admitRenewEphemResv(pkt *conf.ExtPkt) error {
 		if assert.On {
 			assert.Must(err == nil, "GetResvIfids must succeed", "err", err)
 		}
-		err = issueSOF(pkt.Pld.Data.(*sbreq.EphemReq), pkt.Ephem.IDs, pkt.Ephem.PathLens, ifids,
-			pkt.Ephem.CurrHop, pkt.Conf)
+		l1key, err := libutil.DeriveASKeyL1(pkt.Addr.IA, pkt.Spkt.DstIA)
+		if err != nil {
+			return common.NewBasicError("Unable to derive key", err)
+		}
+		l2key, err := libutil.DeriveASKeyL2(l1key, nil, nil, true, true, "COLIBRI")
+		if err != nil {
+			return common.NewBasicError("Unable to derive key", err)
+		}
+		nonce := libutil.GetNonce(pkt.Steady.TimeStamp, pkt.Steady.PldHash, pkt.Steady.DVF)
+		err = issueSOF(pkt.Pld.Data.(*sbreq.EphemReq), l2key, nonce, pkt.Addr.IA, pkt.Ephem.IDs,
+			pkt.Ephem.PathLens, ifids, pkt.Ephem.CurrHop, pkt.Conf)
 		if assert.On && err != nil {
 			assert.Must(err == nil, "issueSOF must not fail", "err", err)
 		}
@@ -397,12 +428,14 @@ func admitRenewEphemResv(pkt *conf.ExtPkt) error {
 	return nil
 }
 
-func issueSOF(req *sbreq.EphemReq, ids []sibra.ID, plens []uint8, ifids sbalgo.IFTuple,
-	sofIdx int, conf *conf.Conf) error {
+// REVISE: (rafflc) Here are the SOF fields for ephemeral reservations written
+
+func issueSOF(req *sbreq.EphemReq, key, nonce common.RawBytes, Addr addr.IA, ids []sibra.ID,
+	plens []uint8, ifids sbalgo.IFTuple, sofIdx int, conf *conf.Conf) error {
 
 	mac := conf.SOFMacPool.Get().(hash.Hash)
 	defer conf.SOFMacPool.Put(mac)
-	return req.SetSOF(mac, ids, plens, ifids.InIfid, ifids.EgIfid, sofIdx)
+	return req.SetSOF(mac, key, nonce, Addr, ids, plens, ifids.InIfid, ifids.EgIfid, sofIdx)
 }
 
 func failEphemResv(pkt *conf.ExtPkt, base *sbextn.Base, res sbalgo.EphemRes) {
@@ -435,9 +468,36 @@ func (h *EphemHandler) reversePkt(pkt *conf.ExtPkt) error {
 	if err := pkt.Spkt.Reverse(); err != nil {
 		return err
 	}
+	// IDEA (rafflc) There is nothing implemented to handle ephem requests in Pld.Reverse()
+	// Thus this resulting payload here will be empty I guess... cleanup
+	// also does not work/has not been fully implemented?
 	if err := pkt.Pld.Reverse(); err != nil {
 		return err
 	}
 	pkt.Spkt.SrcHost = pkt.Conf.PublicAddr.Host
+	// TODO (rafflc) Write SIBRA fields at source. Deal with PldHash somehow
+	payload := make(common.RawBytes, pkt.Pld.Len())
+	if _, err := pkt.Pld.WritePld(payload); err != nil {
+		return common.NewBasicError("Failed to write payload", err)
+	}
+	if pkt.Steady == nil {
+		keymac, err := libutil.GetEtoEHashKey("COLIBRI", pkt.Spkt.DstIA, pkt.Spkt.SrcIA, pkt.Spkt.DstHost, pkt.Spkt.SrcHost)
+		if err != nil {
+			return common.NewBasicError("Unable to derive key", err)
+		}
+		err = pkt.Ephem.WriteEphemSource(keymac, payload)
+		if err != nil {
+			return common.NewBasicError("Unable to write ephemeral reservation", err)
+		}
+	} else {
+		keymac, err := libutil.GetAStoASHashKey("COLIBRI", pkt.Spkt.DstIA, pkt.Spkt.SrcIA)
+		if err != nil {
+			return common.NewBasicError("Unable to derive key", err)
+		}
+		err = pkt.Steady.WriteSteadySource(keymac, payload)
+		if err != nil {
+			return common.NewBasicError("Unable to write steady reservation in ephem_handler", err)
+		}
+	}
 	return nil
 }

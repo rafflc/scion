@@ -1,6 +1,8 @@
 package resvd
 
 import (
+	"time"
+
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/scionproto/scion/go/lib/addr"
 	"github.com/scionproto/scion/go/lib/assert"
@@ -17,12 +19,13 @@ import (
 	"github.com/scionproto/scion/go/sibra_srv/conf"
 	"github.com/scionproto/scion/go/sibra_srv/sbalgo/impl"
 	"github.com/scionproto/scion/go/sibra_srv/sbalgo/state"
-	"time"
 )
+
+//TODO: (rafflc) Check this whole file
 
 type TelescopedReserver struct {
 	*BaseReserver
-	baseResKey 	string
+	baseResKey    string
 	pathPredicate spathmeta.PathPredicate
 }
 
@@ -61,7 +64,7 @@ func (r *TelescopedReserver) run() error {
 	if err != nil {
 		return err
 	}
-	if basePath == nil{
+	if basePath == nil {
 		r.Logger.Warn("Base reservation doesn't have a path!")
 		return nil
 	}
@@ -69,7 +72,7 @@ func (r *TelescopedReserver) run() error {
 	if err != nil {
 		return err
 	}
-	if baseId == nil{
+	if baseId == nil {
 		r.Logger.Warn("Base reservation doesn't have a ID!")
 		return nil
 	}
@@ -108,8 +111,8 @@ func (r *TelescopedReserver) setupResv(config *conf.Conf, res *conf.Resv, baseId
 	resDetails := r.controller.SetupReservation(config)
 
 	s := &SteadyTelescopeSetup{
-		ResvReqstr: &ResvReqstr {
-			Reqstr: &Reqstr {
+		ResvReqstr: &ResvReqstr{
+			Reqstr: &Reqstr{
 				Logger:  r.Logger.New("reqstr", "SteadySetup", "id", r.resvID, "idx", 0),
 				id:      r.resvID,
 				resvKey: r.resvKey,
@@ -123,9 +126,9 @@ func (r *TelescopedReserver) setupResv(config *conf.Conf, res *conf.Resv, baseId
 			split: resDetails.Split,
 			props: resDetails.Props,
 		},
-		path: r.path,
-		pt:   resDetails.PathType,
-		baseId:baseId,
+		path:   r.path,
+		pt:     resDetails.PathType,
+		baseId: baseId,
 		ephMetric: prometheus.Labels{
 			"dstAs": res.IA.String(),
 			"type":  res.PathType.String()},
@@ -136,8 +139,8 @@ func (r *TelescopedReserver) setupResv(config *conf.Conf, res *conf.Resv, baseId
 func (r *TelescopedReserver) preparePath(config *conf.Conf, res *conf.Resv, basePath *spathmeta.AppPath) bool {
 	assert.Must(basePath != nil, "Base path must exist!")
 
-	pathPred := spathmeta.PathPredicate {
-		Match:basePath.Entry.Path.Interfaces,
+	pathPred := spathmeta.PathPredicate{
+		Match: basePath.Entry.Path.Interfaces,
 	}
 
 	if !r.checkPath(config, &pathPred) {
@@ -166,9 +169,9 @@ func (r *TelescopedReserver) preparePath(config *conf.Conf, res *conf.Resv, base
 
 type SteadyTelescopeSetup struct {
 	*ResvReqstr
-	path *spathmeta.AppPath
-	pt   sibra.PathType
-	baseId sibra.ID
+	path      *spathmeta.AppPath
+	pt        sibra.PathType
+	baseId    sibra.ID
 	ephMetric prometheus.Labels
 }
 
@@ -188,7 +191,7 @@ func (s *SteadyTelescopeSetup) CreateExtPkt() (*conf.ExtPkt, error) {
 	if err != nil {
 		return nil, common.NewBasicError("Unable to probe rlc", err)
 	}
-	info := &sbresv.Info {
+	info := &sbresv.Info{
 		ExpTick:  sibra.CurrentTick() + sibra.MaxSteadyTicks,
 		BwCls:    s.max,
 		RLC:      rlc,
@@ -242,8 +245,8 @@ func (s *SteadyTelescopeSetup) HandleRep(pkt *conf.ExtPkt) error {
 		return err
 	}
 	block := pkt.Pld.Data.(*sbreq.SteadySucc).Block
-	c := &ConfirmIndex {
-		Reqstr: &Reqstr {
+	c := &ConfirmIndex{
+		Reqstr: &Reqstr{
 			Logger:  s.Logger.New("sub", "ConfirmIndex", "state", sibra.StatePending),
 			id:      s.id,
 			idx:     s.idx,
@@ -261,12 +264,14 @@ func (s *SteadyTelescopeSetup) HandleRep(pkt *conf.ExtPkt) error {
 	return nil
 }
 
+// TODO: (rafflc) Deal with TimeStamp
+
 func steadyTelescopeReq(baseId sibra.ID, info *sbresv.Info, min, max sibra.BwCls, props sibra.EndProps,
 	split sibra.SplitCls, numHops int) *sbreq.Pld {
 
 	// Create request block.
 	req := &sbreq.SteadyReq{
-		BaseID:baseId,
+		BaseID:      baseId,
 		DataType:    sbreq.RSteadySetupTelescope,
 		AccBw:       max,
 		EndProps:    props,
@@ -287,12 +292,12 @@ func steadyTelescopeReq(baseId sibra.ID, info *sbresv.Info, min, max sibra.BwCls
 		req.OfferFields[0].AllocBw = max
 	}
 	pld := &sbreq.Pld{
-		NumHops:   uint8(numHops),
-		Type:      sbreq.RSteadySetupTelescope,
-		Data:      req,
-		Accepted:  true,
-		Auths:     make([]common.RawBytes, numHops),
-		TimeStamp: uint32(time.Now().Unix()),
+		NumHops:  uint8(numHops),
+		Type:     sbreq.RSteadySetupTelescope,
+		Data:     req,
+		Accepted: true,
+		Auths:    make([]common.RawBytes, numHops),
+		//TimeStamp: uint32(time.Now().Unix()),
 	}
 	pld.TotalLen = uint16(pld.Len())
 	return pld

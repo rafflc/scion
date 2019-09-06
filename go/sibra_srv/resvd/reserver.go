@@ -15,10 +15,11 @@
 package resvd
 
 import (
-	"github.com/prometheus/client_golang/prometheus"
-	"github.com/scionproto/scion/go/sibra_srv/resvd/controller"
 	"sync"
 	"time"
+
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/scionproto/scion/go/sibra_srv/resvd/controller"
 
 	"github.com/scionproto/scion/go/lib/addr"
 	"github.com/scionproto/scion/go/lib/common"
@@ -51,17 +52,17 @@ func getID(config *conf.Conf) sibra.ID {
 type BaseReserver struct {
 	sync.Mutex
 	log.Logger
-	resvKey   string
-	resvID    sibra.ID
-	syncPaths *pathmgr.SyncPaths
-	filter    *pktcls.ActionFilterPaths
-	pred      string
-	pathKey   spathmeta.PathKey
-	pathLock  sync.RWMutex
-	path      *spathmeta.AppPath
-	notifyReg chan NotifyReg
-	stop      chan struct{}
-	stopped   bool
+	resvKey    string
+	resvID     sibra.ID
+	syncPaths  *pathmgr.SyncPaths
+	filter     *pktcls.ActionFilterPaths
+	pred       string
+	pathKey    spathmeta.PathKey
+	pathLock   sync.RWMutex
+	path       *spathmeta.AppPath
+	notifyReg  chan NotifyReg
+	stop       chan struct{}
+	stopped    bool
 	controller controller.ReservationController
 }
 
@@ -134,10 +135,10 @@ func (r *BaseReserver) isRecent(config *conf.Conf, e *state.SteadyResvEntry) boo
 		return false
 	}
 	return !r.controller.ShouldRenew(controller.ReservationDetails{
-		Min:idx.MinBW,
-		Max:idx.MaxBW,
-		Props:idx.EndProps,
-		Split:idx.Split,
+		Min:   idx.MinBW,
+		Max:   idx.MaxBW,
+		Props: idx.EndProps,
+		Split: idx.Split,
 	})
 }
 
@@ -190,6 +191,7 @@ func (r *BaseReserver) activateIdx(config *conf.Conf, idx sibra.Index) {
 	defer r.pathLock.RUnlock()
 
 	r.Debug("Starting to activate index", "idx", idx)
+	//IDEA: (rafflc) Make sure this steady block here has type reservation
 	e := config.LocalResvs.Get(r.resvID, idx)
 
 	// FIXME(roosd): set correct signature and whitelist
@@ -217,6 +219,8 @@ func (r *BaseReserver) activateIdx(config *conf.Conf, idx sibra.Index) {
 			timeout: e.Block.Info.RLC.Duration(),
 
 			succFunc: func(ReqstrI) {
+				//TODO (rafflc) This is the only place where steady meta reservations are stored
+				// make sure they are in reservation state here :)
 				r.Info("insert", "s", meta.StartIA(), "e", meta.EndIA())
 				if _, err := conf.Get().ResvDB.Insert(meta); err != nil {
 					r.Debug("Unable to insert", "err", err)
@@ -237,8 +241,8 @@ func (r *BaseReserver) setupResv(config *conf.Conf, res *conf.Resv) {
 	defer r.pathLock.RUnlock()
 
 	s := &SteadySetup{
-		ResvReqstr: &ResvReqstr {
-			Reqstr: &Reqstr {
+		ResvReqstr: &ResvReqstr{
+			Reqstr: &Reqstr{
 				Logger:  r.Logger.New("reqstr", "SteadySetup", "id", r.resvID, "idx", 0),
 				id:      r.resvID,
 				resvKey: r.resvKey,
@@ -271,6 +275,8 @@ func (r *BaseReserver) renewResv(config *conf.Conf, e *state.SteadyResvEntry, re
 		ResvID: r.resvID,
 		SegID:  sibra_mgmt.PathToSegID(r.pathToIntfs(r.path, resDetails.PathType)),
 	}
+	// IDEA: (rafflc) ResvDB.Get returns meta blocks of steady reservations
+	// the SOF should have type Reservation
 	results, err := config.ResvDB.Get(p)
 	if err != nil {
 		return err
@@ -285,7 +291,7 @@ func (r *BaseReserver) renewResv(config *conf.Conf, e *state.SteadyResvEntry, re
 	r.Debug("Starting renew request", "idx", idx)
 	s := &SteadyRenew{
 		ResvReqstr: &ResvReqstr{
-			Reqstr: &Reqstr {
+			Reqstr: &Reqstr{
 				Logger:  r.Logger.New("reqstr", "SteadyRenew", "id", r.resvID, "idx", idx),
 				id:      r.resvID,
 				idx:     idx,
@@ -302,7 +308,7 @@ func (r *BaseReserver) renewResv(config *conf.Conf, e *state.SteadyResvEntry, re
 			split: resDetails.Split,
 			props: resDetails.Props,
 		},
-		ephMetric:prometheus.Labels{
+		ephMetric: prometheus.Labels{
 			"dstAs": res.IA.String(),
 			"type":  res.PathType.String()},
 	}
@@ -426,4 +432,3 @@ func (r *BaseReserver) Closed() bool {
 	defer r.Unlock()
 	return r.stopped
 }
-

@@ -96,6 +96,9 @@ func (h *ExternalHandler) handle(r *infra.Request) error {
 	return common.NewBasicError("Dropping non-request packet", nil)
 }
 
+// IDEA: (rafflc) Still don't understand why these checks are performed here
+// As far as I understand, the border router should have already checked all of that?
+
 func (h *ExternalHandler) validate(base *sbextn.Base, pkt *conf.ExtPkt) error {
 	ifids, err := util.GetResvIfids(base, pkt.Spkt)
 	if err != nil {

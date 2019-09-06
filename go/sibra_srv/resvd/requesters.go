@@ -15,8 +15,9 @@
 package resvd
 
 import (
-	"github.com/prometheus/client_golang/prometheus"
 	"time"
+
+	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/patrickmn/go-cache"
 
@@ -32,6 +33,7 @@ import (
 	"github.com/scionproto/scion/go/lib/spath"
 	"github.com/scionproto/scion/go/lib/spath/spathmeta"
 	"github.com/scionproto/scion/go/lib/spkt"
+	libutil "github.com/scionproto/scion/go/lib/util"
 	"github.com/scionproto/scion/go/sibra_srv/adm"
 	"github.com/scionproto/scion/go/sibra_srv/conf"
 	"github.com/scionproto/scion/go/sibra_srv/util"
@@ -132,6 +134,10 @@ func (r *Reqstr) reversePkt(pkt *conf.ExtPkt) error {
 	return nil
 }
 
+// TODO: (rafflc) Here are packets from a sibra_srv sent
+// THis is for the sibra_srv what sendRequest() in requesters:166
+// is for the sibrad
+
 func (r *Reqstr) sendPkt(pkt *conf.ExtPkt) error {
 	buf, err := util.PackWithPld(pkt.Spkt, pkt.Pld)
 	if err != nil {
@@ -148,26 +154,6 @@ func (r *Reqstr) sendPkt(pkt *conf.ExtPkt) error {
 			"expected", len(buf), "actual", written)
 	}
 	return nil
-}
-
-func (r *Reqstr) CreateExtPkt() (*conf.ExtPkt, error) {
-	var err error
-	pkt := &conf.ExtPkt{
-		Conf: conf.Get(),
-	}
-	pkt.Steady, err = sbcreate.NewSteadyUse(r.id, r.block, !r.block.Info.PathType.Reversed())
-	if err != nil {
-		return nil, err
-	}
-	pkt.Spkt = &spkt.ScnPkt{
-		DstIA:   r.path.Entry.Path.DstIA(),
-		SrcIA:   r.path.Entry.Path.SrcIA(),
-		DstHost: r.dstHost,
-		SrcHost: r.srcHost,
-		HBHExt:  []common.Extension{pkt.Steady},
-		L4:      l4.L4Header(&l4.UDP{Checksum: make(common.RawBytes, 2)}),
-	}
-	return pkt, nil
 }
 
 func (r *Reqstr) OnError(err error) {
@@ -198,6 +184,16 @@ func (r *ResvReqstr) handleRep(pkt *conf.ExtPkt) error {
 	}
 	block := pkt.Pld.Data.(*sbreq.SteadySucc).Block
 	r.Debug("Reservation has been accepted", "info", block.Info)
+
+	//TODO: (rafflc) Handle here storing reservation
+	if err := block.SteadyToReservation(); err != nil {
+		return common.NewBasicError("Failed to transform to reservation", err)
+	}
+	// IDEA (rafflc) This is the only place where reservations to LocalResvs
+	// are written. Make sure it has type Reservation
+	// furthermore, we also need to update it in the packet since
+	// it gets reused to start a indexupdate requester which assumes
+	// the reservation to have type Reservation
 	e := &conf.LocalResvEntry{
 		Id:       r.id.Copy(),
 		State:    sibra.StateTemp,
@@ -205,6 +201,7 @@ func (r *ResvReqstr) handleRep(pkt *conf.ExtPkt) error {
 		Creation: time.Now(),
 	}
 	conf.Get().LocalResvs.Set(r.id, r.idx, e, cache.DefaultExpiration)
+	pkt.Pld.Data.(*sbreq.SteadySucc).Block = block
 	return nil
 }
 
@@ -215,6 +212,22 @@ func (r *ResvReqstr) validate(pkt *conf.ExtPkt) error {
 	if !pkt.Steady.GetCurrID().Eq(r.id) {
 		return common.NewBasicError("Invalid reservation id", nil,
 			"expected", r.id, "actual", pkt.Steady.GetCurrID())
+	}
+	// TODO (rafflc) Deal here with check of payload :)
+	payload := make(common.RawBytes, pkt.Pld.Len())
+	if _, err := pkt.Pld.WritePld(payload); err != nil {
+		return common.NewBasicError("Failed to write payload", err)
+	}
+	PldH, err := libutil.Calc32Hash(payload)
+	if err != nil {
+		common.NewBasicError("Computing PldHash failed", err)
+	}
+	keymac, err := libutil.GetAStoASHashKey("COLIBRI", pkt.Spkt.DstIA, pkt.Spkt.SrcIA)
+	if err != nil {
+		return common.NewBasicError("Unable to derive key", err)
+	}
+	if err := pkt.Steady.ValidateSibraDest(keymac, PldH); err != nil {
+		return common.NewBasicError("Invalid SIBRA fields", err)
 	}
 	var info *sbresv.Info
 	switch r := pkt.Pld.Data.(type) {
@@ -233,8 +246,8 @@ func (r *ResvReqstr) validate(pkt *conf.ExtPkt) error {
 
 type SteadySetup struct {
 	*ResvReqstr
-	path *spathmeta.AppPath
-	pt   sibra.PathType
+	path      *spathmeta.AppPath
+	pt        sibra.PathType
 	ephMetric prometheus.Labels
 }
 
@@ -270,6 +283,22 @@ func (s *SteadySetup) CreateExtPkt() (*conf.ExtPkt, error) {
 	sPath := spath.New(s.path.Entry.Path.FwdPath)
 	if err := sPath.InitOffsets(); err != nil {
 		return nil, err
+	}
+	// TODO: (rafflc) In newsteadysetup we build the extension used for
+	// steady setup request. what to do with the fields?
+	// We somehow also have to define a mechanism for this :)
+	keymac, err := libutil.GetAStoASHashKey("COLIBRI", s.path.Entry.Path.DstIA(), s.path.Entry.Path.SrcIA())
+	if err != nil {
+		return nil, common.NewBasicError("Unable to derive key", err)
+	}
+	payload := make(common.RawBytes, pkt.Pld.Len())
+	if _, err := pkt.Pld.WritePld(payload); err != nil {
+		return nil, common.NewBasicError("Failed to write payload", err)
+	}
+	// TODO: (rafflc) This is a setup request and thus we need to do sth here
+	err = pkt.Steady.WriteSteadySource(keymac, payload)
+	if err != nil {
+		return nil, common.NewBasicError("Unable to write steady reservation in requesters d 1", err)
 	}
 	pkt.Spkt = &spkt.ScnPkt{
 		DstIA:   s.path.Entry.Path.DstIA(),
@@ -331,7 +360,11 @@ type SteadyRenew struct {
 	ephMetric prometheus.Labels
 }
 
-func (s *SteadyRenew) PrepareReq(pkt *conf.ExtPkt) error {
+func (s *SteadyRenew) CreateExtPkt() (*conf.ExtPkt, error) {
+	var err error
+	pkt := &conf.ExtPkt{
+		Conf: conf.Get(),
+	}
 	info := &sbresv.Info{
 		ExpTick:  sibra.CurrentTick() + sibra.MaxSteadyTicks,
 		BwCls:    s.max,
@@ -341,10 +374,41 @@ func (s *SteadyRenew) PrepareReq(pkt *conf.ExtPkt) error {
 	}
 	pkt.Pld = steadyReq(sbreq.RSteadyRenewal, info, s.min, s.max,
 		s.props, s.split, s.block.NumHops())
-	err := pkt.Steady.ToRequest(pkt.Pld)
+	// IDEA (rafflc) The block used in the next method should have type reservation
+	pkt.Steady, err = sbcreate.NewSteadyUse(s.id, s.block, !s.block.Info.PathType.Reversed())
 	if err != nil {
-		return err
+		return nil, err
 	}
+	err = pkt.Steady.ToRequest(pkt.Pld)
+	if err != nil {
+		return nil, err
+	}
+	// REVISE: (rafflc) Write SIBRA fields here :)
+	keymac, err := libutil.GetAStoASHashKey("COLIBRI", s.path.Entry.Path.DstIA(), s.path.Entry.Path.SrcIA())
+	if err != nil {
+		return nil, common.NewBasicError("Unable to derive key", err)
+	}
+	payload := make(common.RawBytes, pkt.Pld.Len())
+	if _, err := pkt.Pld.WritePld(payload); err != nil {
+		return nil, common.NewBasicError("Failed to write payload", err)
+	}
+	err = pkt.Steady.WriteSteadySource(keymac, payload)
+	if err != nil {
+		return nil, common.NewBasicError("Unable to write steady reservation  in requesters d 2", err)
+	}
+	pkt.Spkt = &spkt.ScnPkt{
+		DstIA:   s.path.Entry.Path.DstIA(),
+		SrcIA:   s.path.Entry.Path.SrcIA(),
+		DstHost: s.dstHost,
+		SrcHost: s.srcHost,
+		HBHExt:  []common.Extension{pkt.Steady},
+		L4:      l4.L4Header(&l4.UDP{Checksum: make(common.RawBytes, 2)}),
+	}
+	return pkt, nil
+
+}
+
+func (s *SteadyRenew) PrepareReq(pkt *conf.ExtPkt) error {
 	if err := adm.AdmitSteadyResv(pkt, pkt.Pld.Data.(*sbreq.SteadyReq), s.ephMetric); err != nil {
 		return common.NewBasicError("Unable to admit reservation", err)
 	}
@@ -362,6 +426,7 @@ func (s *SteadyRenew) HandleRep(pkt *conf.ExtPkt) error {
 	if err := s.handleRep(pkt); err != nil {
 		return err
 	}
+	// IDEA (rafflc) block should here still be in Reservation
 	c := &ConfirmIndex{
 		Reqstr: &Reqstr{
 			Logger:  s.Logger.New("sub", "ConfirmIndex", "state", sibra.StatePending),
@@ -386,22 +451,55 @@ type ConfirmIndex struct {
 	state sibra.State
 }
 
-func (c *ConfirmIndex) PrepareReq(pkt *conf.ExtPkt) error {
+func (c *ConfirmIndex) CreateExtPkt() (*conf.ExtPkt, error) {
+	var err error
+	pkt := &conf.ExtPkt{
+		Conf: conf.Get(),
+	}
 	pkt.Pld = &sbreq.Pld{
-		NumHops:   uint8(c.block.NumHops()),
-		TimeStamp: uint32(time.Now().Unix()),
-		Accepted:  true,
-		Type:      sbreq.RSteadyConfIndex,
-		Auths:     make([]common.RawBytes, c.block.NumHops()),
+		NumHops:  uint8(c.block.NumHops()),
+		Accepted: true,
+		Type:     sbreq.RSteadyConfIndex,
+		Auths:    make([]common.RawBytes, c.block.NumHops()),
 		Data: &sbreq.ConfirmIndex{
 			State: c.state,
 			Idx:   c.idx,
 		},
 	}
 	pkt.Pld.TotalLen = uint16(pkt.Pld.Len())
-	if err := pkt.Steady.ToRequest(pkt.Pld); err != nil {
-		return err
+	// IDEA: (rafflc) c.block hast type reservation, needs to be transformed to data
+	pkt.Steady, err = sbcreate.NewSteadyUse(c.id, c.block, !c.block.Info.PathType.Reversed())
+	if err != nil {
+		return nil, err
 	}
+	if err := pkt.Steady.ToRequest(pkt.Pld); err != nil {
+		return nil, err
+	}
+	// REVISE: (rafflc) Write SIBRA fields here :)
+	keymac, err := libutil.GetAStoASHashKey("COLIBRI", c.path.Entry.Path.DstIA(), c.path.Entry.Path.SrcIA())
+	if err != nil {
+		return nil, common.NewBasicError("Unable to derive key", err)
+	}
+	payload := make(common.RawBytes, pkt.Pld.Len())
+	if _, err := pkt.Pld.WritePld(payload); err != nil {
+		return nil, common.NewBasicError("Failed to write payload", err)
+	}
+	err = pkt.Steady.WriteSteadySource(keymac, payload)
+	if err != nil {
+		return nil, common.NewBasicError("Unable to write steady reservation in requesters d 3", err)
+	}
+	pkt.Spkt = &spkt.ScnPkt{
+		DstIA:   c.path.Entry.Path.DstIA(),
+		SrcIA:   c.path.Entry.Path.SrcIA(),
+		DstHost: c.dstHost,
+		SrcHost: c.srcHost,
+		HBHExt:  []common.Extension{pkt.Steady},
+		L4:      l4.L4Header(&l4.UDP{Checksum: make(common.RawBytes, 2)}),
+	}
+	return pkt, nil
+}
+
+func (c *ConfirmIndex) PrepareReq(pkt *conf.ExtPkt) error {
 	return adm.Promote(pkt, pkt.Pld.Data.(*sbreq.ConfirmIndex))
 }
 
@@ -431,6 +529,22 @@ func (c *ConfirmIndex) validate(pkt *conf.ExtPkt) error {
 	if !pkt.Steady.GetCurrID().Eq(c.id) {
 		return common.NewBasicError("Invalid reservation id", nil,
 			"expected", c.id, "actual", pkt.Steady.GetCurrID())
+	}
+	// TODO (rafflc) Deal here with check of payload :)
+	payload := make(common.RawBytes, pkt.Pld.Len())
+	if _, err := pkt.Pld.WritePld(payload); err != nil {
+		return common.NewBasicError("Failed to write payload", err)
+	}
+	PldH, err := libutil.Calc32Hash(payload)
+	if err != nil {
+		common.NewBasicError("Computing PldHash failed", err)
+	}
+	keymac, err := libutil.GetAStoASHashKey("COLIBRI", pkt.Spkt.DstIA, pkt.Spkt.SrcIA)
+	if err != nil {
+		return common.NewBasicError("Unable to derive key", err)
+	}
+	if err := pkt.Steady.ValidateSibraDest(keymac, PldH); err != nil {
+		return common.NewBasicError("Invalid SIBRA fields", err)
 	}
 	r, ok := pkt.Pld.Data.(*sbreq.ConfirmIndex)
 	if !ok {
@@ -470,12 +584,11 @@ func steadyReq(t sbreq.DataType, info *sbresv.Info, min, max sibra.BwCls, props 
 		req.OfferFields[0].AllocBw = max
 	}
 	pld := &sbreq.Pld{
-		NumHops:   uint8(numHops),
-		Type:      t,
-		Data:      req,
-		Accepted:  true,
-		Auths:     make([]common.RawBytes, numHops),
-		TimeStamp: uint32(time.Now().Unix()),
+		NumHops:  uint8(numHops),
+		Type:     t,
+		Data:     req,
+		Accepted: true,
+		Auths:    make([]common.RawBytes, numHops),
 	}
 	pld.TotalLen = uint16(pld.Len())
 	return pld

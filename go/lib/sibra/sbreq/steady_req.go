@@ -12,6 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// IDEA: (rafflc) Instead of creating another TimeStamp for this thingy
+// we will just take the ExpT of the Infofield in the payload
+// (if this works)
+
 package sbreq
 
 import (

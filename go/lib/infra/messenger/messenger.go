@@ -297,6 +297,11 @@ func (m *Messenger) SendChainIssueReply(ctx context.Context, msg *cert_mgmt.Chai
 	return m.getRequester(infra.ChainIssueReply, infra.None).Notify(ctx, pld, a)
 }
 
+//////////////////////////////////////////////////////////////////
+// IDEA: (rafflc) Sending/Getting of SIBRA request stuff        //
+// start                                                        //
+//////////////////////////////////////////////////////////////////
+
 // SendSibraSteady sends a reliable sibra_mgmt.SteadyRep to address a.
 func (m *Messenger) SendSibraEphemReq(ctx context.Context, msg *sibra_mgmt.EphemReq, a net.Addr,
 	id uint64) error {
@@ -390,6 +395,10 @@ func (m *Messenger) AckRegisterSibraSteady(ctx context.Context, msg *sibra_mgmt.
 	}
 	return m.getRequester(infra.None, infra.None).Notify(ctx, pld, a)
 }
+
+//////////////////////////////////////////////////////////////////
+// end                                                          //
+//////////////////////////////////////////////////////////////////
 
 // AddHandler registers a handler for msgType.
 func (m *Messenger) AddHandler(msgType infra.MessageType, handler infra.Handler) {

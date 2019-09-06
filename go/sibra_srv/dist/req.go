@@ -29,6 +29,10 @@ import (
 	"github.com/scionproto/scion/go/sibra_srv/conf"
 )
 
+// IDEA: (rafflc) Is this where GetSibraSteady gets its reservation?
+// To me this seems to be the case. Thus here would be the place
+// to influence how this is actually processed :)
+
 var _ infra.Handler = (*SteadyReqHandler)(nil)
 
 type SteadyReqHandler struct{}
@@ -39,11 +43,15 @@ func (h *SteadyReqHandler) Handle(r *infra.Request) {
 	config := conf.Get()
 	log.Debug("[SteadyReqHandler] Received request", "addr", saddr, "req", pld)
 
+	// TODO: (rafflc)Maybe check here this stuff
+
 	p := &query.Params{
 		StartsAt: []addr.IA{pld.StartIA()},
 		EndsAt:   []addr.IA{pld.EndIA()},
 		SegID:    pld.SegID,
 	}
+	// IDEA: (rafflc) ResvDB.Get returns meta blocks of steady reservations
+	// the SOF should have type Reservation
 	results, err := config.ResvDB.Get(p)
 	if err != nil {
 		h.logDropReq(saddr, pld, err)
@@ -56,6 +64,8 @@ func (h *SteadyReqHandler) Handle(r *infra.Request) {
 			blocks = append(blocks, results[i].BlockMeta)
 		}
 	}
+
+	log.Debug("Found reservation:", "nr", len(results))
 
 	rep := &sibra_mgmt.SteadyRep{
 		Req: pld,

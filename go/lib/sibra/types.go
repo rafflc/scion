@@ -53,6 +53,24 @@ const (
 
 	// MaxRLC is the maximum request latency class. It equates to 4 seconds.
 	MaxRLC RLC = 12
+
+	//REVIEW: (rafflc) Added constants for max time per hop
+
+	// MaxRequestHop is the maximum time a request packet is allowed to travel for each hop in Nanoseconds.
+	// We set this to 300ms.
+	MaxRequestHop uint64 = 300000000
+	// MaxDataHop is the maximum time a data packet is allowed to travel for each hop in Nanoseconds.
+	// We set this to 100ms.
+	MaxDataHop uint64 = 100000000
+
+	// TStoNanoEphem is the constant to get from the timestamp for ephem to nanoseconds
+	TStoNanoEphem float64 = float64(16000000000 / 4294967296)
+
+	// TStoNanoSteady is the constant to get from the timestamp for steady to nanoseconds
+	TStoNanoSteady float64 = float64(320000000000 / 4294967296)
+
+	//ExpTicktoNano is the constant to get from ExpTick to nanoseconds
+	ExpTicktoNano = 4000000000
 )
 
 // ID is the SIBRA reservation id. It can either be a steady id

@@ -26,6 +26,11 @@ import (
 	"github.com/scionproto/scion/go/sibra_srv/sbalgo"
 )
 
+// TODO: (rafflc) Here are packets from a sibra_srv forwarded
+// Forward is similar to write in conn.go. It is also last point before
+// written to some message buffer. SIBRA fields already written before,
+// so nothing to do here
+
 func Forward(pkt *conf.ExtPkt) error {
 	var base *sbextn.Base
 	switch {

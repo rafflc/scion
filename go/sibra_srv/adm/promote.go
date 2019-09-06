@@ -20,9 +20,12 @@ import (
 	"github.com/scionproto/scion/go/lib/common"
 	"github.com/scionproto/scion/go/lib/sibra"
 	"github.com/scionproto/scion/go/lib/sibra/sbreq"
+	libutil "github.com/scionproto/scion/go/lib/util"
 	"github.com/scionproto/scion/go/sibra_srv/conf"
 	"github.com/scionproto/scion/go/sibra_srv/util"
 )
+
+// REVISE: (rafflc) Here are the SOF fields for steady reservations written
 
 func PromoteToSOFCreated(pkt *conf.ExtPkt) error {
 	r, ok := pkt.Pld.Data.(*sbreq.SteadySucc)
@@ -37,9 +40,18 @@ func PromoteToSOFCreated(pkt *conf.ExtPkt) error {
 	if err != nil {
 		return common.NewBasicError("Unable to promote to SOF created", err)
 	}
+	l1key, err := libutil.DeriveASKeyL1(pkt.Addr.IA, pkt.Spkt.DstIA)
+	if err != nil {
+		return common.NewBasicError("Unable to derive key", err)
+	}
+	l2key, err := libutil.DeriveASKeyL2(l1key, nil, nil, true, true, "COLIBRI")
+	if err != nil {
+		return common.NewBasicError("Unable to derive key", err)
+	}
+	nonce := libutil.GetNonce(pkt.Steady.TimeStamp, pkt.Steady.PldHash, pkt.Steady.DVF)
 	mac := pkt.Conf.SOFMacPool.Get().(hash.Hash)
 	defer pkt.Conf.SOFMacPool.Put(mac)
-	return r.SetSOF(mac, pkt.Steady.IDs, pkt.Steady.PathLens, ifids.InIfid,
+	return r.SetSOF(mac, l2key, nonce, pkt.Addr.IA, pkt.Steady.IDs, pkt.Steady.PathLens, ifids.InIfid,
 		ifids.EgIfid, int(pkt.Steady.SOFIndex))
 
 }

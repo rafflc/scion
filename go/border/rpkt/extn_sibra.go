@@ -16,6 +16,7 @@ package rpkt
 
 import (
 	"fmt"
+
 	"github.com/scionproto/scion/go/border/rcmn"
 	"github.com/scionproto/scion/go/lib/common"
 	"github.com/scionproto/scion/go/lib/sibra"
@@ -52,8 +53,10 @@ func rSibraExtnFromRaw(rp *RtrPkt, start, end int) (*rSibraExtn, error) {
 	return ext, nil
 }
 
+//REVIEW: (rafflc) Increase starting point of reading from raw
+
 func (s *rSibraExtn) parseResvIDs() {
-	off, end := 0, common.ExtnFirstLineLen
+	off, end := 0, sbextn.MinBaseLen
 	if !s.Steady {
 		off, end = end, end+sibra.EphemIDLen
 		s.ParseID(s.raw[off:end])
@@ -131,7 +134,7 @@ func (s *rSibraExtn) SOF() *sbresv.SOField {
 		return s.sofF
 	}
 	off := s.calcSOFOff()
-	s.sofF, _ = sbresv.NewSOFieldFromRaw(s.raw[off : off+sbresv.SOFieldLen])
+	s.sofF, _ = sbresv.NewSOFieldFromRaw(s.raw[off : off+sbresv.DataSOFieldLen])
 	return s.sofF
 }
 
@@ -146,18 +149,18 @@ func (s *rSibraExtn) RawVerifyingSOF() common.RawBytes {
 	} else {
 		return nil
 	}
-	off := s.calcSOFOff() + sbresv.SOFieldLen*diff
-	return s.raw[off : off+sbresv.SOFieldLen]
+	off := s.calcSOFOff() + sbresv.DataSOFieldLen*diff
+	return s.raw[off : off+sbresv.DataSOFieldLen]
 }
 
 func (s *rSibraExtn) calcSOFOff() int {
-	return s.calcInfoOff() + sbresv.InfoLen + int(s.RelSOFIdx)*sbresv.SOFieldLen
+	return s.calcInfoOff() + sbresv.InfoLen + int(s.RelSOFIdx)*sbresv.DataSOFieldLen
 }
 
 func (s *rSibraExtn) calcInfoOff() int {
 	infoOff := s.offBlocks
 	for i := 0; i < s.CurrBlock; i++ {
-		infoOff += sbresv.InfoLen + int(s.PathLens[i])*sbresv.SOFieldLen
+		infoOff += sbresv.InfoLen + int(s.PathLens[i])*sbresv.DataSOFieldLen
 	}
 	return infoOff
 }
@@ -170,6 +173,9 @@ func (s *rSibraExtn) String() string {
 	return ext.String()
 }
 
+//IDEA: (rafflc) The hooks for the border router are added here
+//REVISE: (rafflc) VerifySOF already includes now timestamp check
+
 func (s *rSibraExtn) RegisterHooks(h *hooks) error {
 	// Steady setup requests do not have an active reservation block.
 	if !s.Setup {
@@ -180,14 +186,16 @@ func (s *rSibraExtn) RegisterHooks(h *hooks) error {
 		h.Validate = append(h.Validate, s.VerifySOF)
 	}
 
+	//IDEA: (rafflc) Add packet replay suppression mechanism here
+
 	if !s.IsRequest {
 		h.Route = append(h.Route, s.RouteSibraData)
 
 		// In case we have QoS traffic, proper monitoring needs to be configured
 		if !s.BestEffort {
-			if s.rp.DirFrom == rcmn.DirLocal && s.CurrHop==0 {
+			if s.rp.DirFrom == rcmn.DirLocal && s.CurrHop == 0 {
 				h.Validate = append(h.Validate, s.VerifyLocalFlowBW)
-			} else if s.rp.DirFrom == rcmn.DirExternal{
+			} else if s.rp.DirFrom == rcmn.DirExternal {
 				h.Validate = append(h.Validate, s.VerifyTransitFlowBW)
 			}
 		}

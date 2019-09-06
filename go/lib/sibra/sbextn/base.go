@@ -32,7 +32,14 @@ const (
 	UnsupportedVersion = "Unsupported SIBRA version"
 	UnableSetMac       = "Unable to set mac"
 
-	minBaseLen = common.ExtnFirstLineLen
+	//REVIEW: (rafflc) update MinBaseLen
+
+	EpicFieldLen   = 24
+	DVFLen         = 16
+	maxDVFInputLen = 8 + 3*sibra.SteadyIDLen + sibra.EphemIDLen
+
+	// MinBaseLen is length of extension header to and with TimeStamp
+	MinBaseLen = common.ExtnFirstLineLen + EpicFieldLen
 
 	flagSteady     = 0x80
 	flagSetup      = 0x40
@@ -44,13 +51,26 @@ const (
 	offFlags    = 0
 	offPathLens = 2
 	OffSOFIndex = 1
+
+	//REVIEW: (rafflc) add offsets
+	OffDVF  = 5
+	OffPldH = 21
+	OffTS   = 25
 )
+
+//REVIEW: (rafflc) Changed structure of basis
 
 // Base is the basis for steady and ephemeral extensions.
 //
 // 0B       1        2        3        4        5        6        7
 // +--------+--------+--------+--------+--------+--------+--------+--------+
 // | xxxxxxxxxxxxxxxxxxxxxxxx | Flags  |SOF Idx |P0 hops |P1 hops |P2 hops |
+// +--------+--------+--------+--------+--------+--------+--------+--------+
+// | Destination Validation Field (DVF)                                    |
+// +--------+--------+--------+--------+--------+--------+--------+--------+
+// | DVF cont.                                                             |
+// +--------+--------+--------+--------+--------+--------+--------+--------+
+// | Payload Hash (PldHash)            | Timestamp (TS)                    |
 // +--------+--------+--------+--------+--------+--------+--------+--------+
 // | Reservation IDs (1-4)                                                 |
 // +--------+--------+--------+--------+--------+--------+--------+--------+
@@ -101,6 +121,13 @@ type Base struct {
 	// In case of an ephemeral extension, exactly one active block must be present.
 	ActiveBlocks []*sbresv.Block
 
+	//Destination Validation Field
+	DVF common.RawBytes
+	//Payload Hash
+	PldHash common.RawBytes
+	//TimeStamp
+	TimeStamp uint32
+
 	// Version is the SIBRA version.
 	Version uint8
 	// SOFIndex indicates the current SIBRA Opaque Field.
@@ -120,12 +147,14 @@ type Base struct {
 	IsRequest bool
 }
 
+//REVIEW: (rafflc) Adapted to also add three new fields
+
 // BaseFromRaw parses the first line of raw in order to distinguish if it is a
 // steady or ephemeral extension.
 func BaseFromRaw(raw common.RawBytes) (*Base, error) {
-	if len(raw) < minBaseLen {
+	if len(raw) < MinBaseLen {
 		return nil, common.NewBasicError("Raw is smaller than minimum length", nil,
-			"expected", minBaseLen, "actual", len(raw))
+			"expected", MinBaseLen, "actual", len(raw))
 	}
 	b := &Base{}
 	if err := b.parseFlags(raw[offFlags]); err != nil {
@@ -141,6 +170,9 @@ func BaseFromRaw(raw common.RawBytes) (*Base, error) {
 	if err := b.checkMinLen(raw); err != nil {
 		return nil, err
 	}
+	b.DVF = raw[OffDVF:OffPldH]
+	b.PldHash = raw[OffPldH:OffTS]
+	b.TimeStamp = common.Order.Uint32(raw[OffTS : OffTS+4])
 	b.IDs = make([]sibra.ID, 0, 4)
 	b.ActiveBlocks = make([]*sbresv.Block, 0, 3)
 	return b, nil
@@ -179,10 +211,13 @@ func (e *Base) parsePathLens(raw common.RawBytes) error {
 	return nil
 }
 
+// REVIEW: (rafflc) Changed offset, set min len to datasofieldlen. maybe we can make
+// a case distinction here between the types
+
 // checkMinLen checks that the raw buffer is at least the required size for ids and
 // active reservation blocks.
 func (e *Base) checkMinLen(raw common.RawBytes) error {
-	l := common.ExtnFirstLineLen
+	l := MinBaseLen
 	if !e.Steady {
 		l += sibra.EphemIDLen
 	}
@@ -190,10 +225,10 @@ func (e *Base) checkMinLen(raw common.RawBytes) error {
 	l += padding(l + common.ExtnSubHdrLen)
 	if !e.Setup && e.Steady {
 		l += sbresv.InfoLen * e.TotalSteady
-		l += sbresv.SOFieldLen * int(e.PathLens[0]+e.PathLens[1]+e.PathLens[2])
+		l += sbresv.DataSOFieldLen * int(e.PathLens[0]+e.PathLens[1]+e.PathLens[2])
 	} else if !e.Steady {
 		l += sbresv.InfoLen
-		l += sbresv.SOFieldLen * e.TotalHops
+		l += sbresv.DataSOFieldLen * e.TotalHops
 	}
 	if len(raw) < l {
 		return common.NewBasicError("Raw is smaller than minimum length", nil,
@@ -267,22 +302,24 @@ func (e *Base) GetCurrBlock() *sbresv.Block {
 	return e.ActiveBlocks[e.CurrBlock]
 }
 
-func (e *Base) VerifySOF(mac hash.Hash, now time.Time) error {
+//TODO: (rafflc) if neccessary, modifiy parameters passed to Verify
+
+func (e *Base) VerifySOF(svA hash.Hash, now time.Time) error {
 	pLens := []uint8{e.PathLens[e.CurrSteady]}
 	ids := []sibra.ID{e.IDs[e.CurrSteady]}
 	if !e.Steady {
 		pLens = e.PathLens
 		ids = e.IDs
 	}
-	return e.GetCurrBlock().Verify(mac, e.RelSOFIdx, ids, pLens, now)
+	return e.GetCurrBlock().Verify(svA, e.RelSOFIdx, ids, pLens, e.PldHash, e.TimeStamp, now)
 }
 
 // NextSOFIndex updates the SOFIndex based on the direction implied by Forward.
 func (e *Base) NextSOFIndex() error {
 	if e.Forward {
-		e.SOFIndex += 1
+		e.SOFIndex++
 	} else {
-		e.SOFIndex -= 1
+		e.SOFIndex--
 	}
 	return e.UpdateIndices()
 }
@@ -331,7 +368,7 @@ func (e *Base) setSteadyIndexes(ephem bool) error {
 	for ; blockIdx < numBlocks && relIdx >= int(e.PathLens[blockIdx]); blockIdx++ {
 		relIdx -= int(e.PathLens[blockIdx])
 		if ephem {
-			relIdx += 1
+			relIdx++
 		}
 	}
 	if blockIdx >= numBlocks {
@@ -344,10 +381,12 @@ func (e *Base) setSteadyIndexes(ephem bool) error {
 	return nil
 }
 
+//REVIEW: (rafflc) Add additional fields to offset
+
 // ActiveBlockOff returns the offset of the first active block. This is right after
 // the reservation ids.
 func (e *Base) ActiveBlockOff() int {
-	off := common.ExtnFirstLineLen
+	off := MinBaseLen
 	for i := range e.IDs {
 		off += e.IDs[i].Len()
 	}
@@ -381,6 +420,8 @@ func (e *Base) Pack() (common.RawBytes, error) {
 	return b, e.Write(b)
 }
 
+//REVIEW: (rafflc) integrated new fields
+
 func (e *Base) Write(b common.RawBytes) error {
 	if len(b) < e.Len() {
 		return common.NewBasicError("Buffer to short", nil, "method", "SIBRABaseExtn.Write",
@@ -390,6 +431,12 @@ func (e *Base) Write(b common.RawBytes) error {
 	b[OffSOFIndex] = e.SOFIndex
 	off, end := offPathLens, offPathLens+3
 	copy(b[off:end], e.PathLens)
+
+	copy(b[OffDVF:OffPldH], e.DVF)
+	copy(b[OffPldH:OffTS], e.PldHash)
+	off, end = OffTS, OffTS+4
+	common.Order.PutUint32(b[off:end], e.TimeStamp)
+
 	for i := range e.IDs {
 		off, end = end, end+e.IDs[i].Len()
 		if err := e.IDs[i].Write(b[off:end]); err != nil {
